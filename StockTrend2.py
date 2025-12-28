@@ -6,6 +6,36 @@ from plotly.subplots import make_subplots
 import os
 
 # ==============================
+# 🔧 【可控制的參數設定】
+# ==============================
+# 條件開關
+FLAG_VOLUME_SPIKE = False   # 爆量
+FLAG_RED_THREE = True      # 紅三兵
+FLAG_NET_BUY = True        # 三大法人：3天中至少2天淨買超 > 0
+
+# 概念股模式
+IS_CONCEPT_STOCK = True   # 是否使用概念股模式
+
+# 資料夾路徑
+FOLDER_PATH = "stock_data"
+OUTPUT_CHARTS_FOLDER = "output_charts"
+CONCEPT_STOCKS_CSV = "concept_stocks.csv"  # 概念股清單檔案
+
+# 爆量參數（一般模式）
+VOL_LOOKBACK = 7           # 回看天數
+VOL_MULTIPLE = 1.5         # 倍數（相對於前期最高量）
+MIN_VOLUME_THRESHOLD = 5000  # 最近一天成交量最低門檻（張數）
+
+# 爆量參數（概念股模式）- 當 IS_CONCEPT_STOCK = True 且 FLAG_VOLUME_SPIKE = True 時使用
+VOL_CONCEPT_LOOKBACK = 4           # 回看天數
+VOL_CONCEPT_MULTIPLE = 1.2         # 倍數（相對於前期最高量）
+MIN_VOLUME_CONCEPT_THRESHOLD = 5000  # 最近一天成交量最低門檻（張數）
+MAX_PRICE_CONCEPT_THRESHOLD = 50   # 最新收盤價最高門檻（元）- 高於此價格的股票會被過濾
+
+# 紅三兵參數
+PRICE_LOOKBACK = 3         # 回看天數
+
+# ==============================
 # 📈 量價戰法分析引擎
 # ==============================
 def analyze_volume_price_pattern(df):
@@ -254,59 +284,120 @@ def analyze_volume_price_pattern(df):
     }
 
 # ==============================
-# 🔧 【三個可控制的條件開關】
-# ==============================
-FLAG_VOLUME_SPIKE = True   # 爆量
-FLAG_RED_THREE = True      # 紅三兵
-FLAG_NET_BUY = True        # 三大法人：3天中至少2天淨買超 > 0
-
-FOLDER_PATH = "stock_data"
-VOL_LOOKBACK = 7
-VOL_MULTIPLE = 1.5
-PRICE_LOOKBACK = 3
-OUTPUT_CHARTS_FOLDER = "output_charts"
-
-# ==============================
 # 🔧 讀取公司清單（無標題列）
 # ==============================
 def load_company_lists():
-    tse_path = Path("tse_concept_stocks.csv")
-    otc_path = Path("otc_concept_stocks.csv")
-
+    """
+    讀取公司清單，優先順序：
+    1. tse_company_list.csv - 基礎上市公司資料（代碼、名稱）
+    2. tse_concept_stocks.csv - 上市概念股資料（代碼、名稱、概念股領域）
+    3. otc_company_list.csv - 基礎上櫃公司資料（代碼、名稱）
+    4. otc_concept_stocks.csv - 上櫃概念股資料（代碼、名稱、概念股領域）
+    """
     company_info = {}
 
-    if tse_path.exists():
-        tse_df = pd.read_csv(tse_path, header=None, dtype=str)
-        for _, row in tse_df.iterrows():
-            code = str(row[0]).strip()
-            if len(code) == 4 and code.isdigit():
-                name = str(row[1]).strip() if len(row) > 1 else '未知'
-                sector = str(row[2]).strip() if len(row) > 2 else '未知'
-                company_info[code] = {
-                    'name': name,
-                    'type': '上市',
-                    'sector': sector
-                }
+    # 第一步：讀取基礎上市公司清單 tse_company_list.csv
+    tse_company_path = Path("tse_company_list.csv")
+    if tse_company_path.exists():
+        try:
+            tse_company_df = pd.read_csv(tse_company_path, header=None, dtype=str)
+            for _, row in tse_company_df.iterrows():
+                code = str(row[0]).strip()
+                if len(code) == 4 and code.isdigit():
+                    name = str(row[1]).strip() if len(row) > 1 else '未知'
+                    company_info[code] = {
+                        'name': name,
+                        'type': '上市',
+                        'sector': '未知'  # 預設值，會被概念股資料覆蓋
+                    }
+        except Exception as e:
+            print(f"⚠️ 讀取 tse_company_list.csv 失敗: {e}")
 
-    if otc_path.exists():
-        otc_df = pd.read_csv(otc_path, header=None, dtype=str)
-        for _, row in otc_df.iterrows():
-            code = str(row[0]).strip()
-            if len(code) == 4 and code.isdigit():
-                name = str(row[1]).strip() if len(row) > 1 else '未知'
-                sector = str(row[2]).strip() if len(row) > 2 else '未知'
-                company_info[code] = {
-                    'name': name,
-                    'type': '上櫃',
-                    'sector': sector
-                }
+    # 第二步：讀取上市概念股資料，補充或覆蓋資訊
+    tse_concept_path = Path("tse_concept_stocks.csv")
+    if tse_concept_path.exists():
+        try:
+            tse_df = pd.read_csv(tse_concept_path, header=None, dtype=str)
+            for _, row in tse_df.iterrows():
+                code = str(row[0]).strip()
+                if len(code) == 4 and code.isdigit():
+                    name = str(row[1]).strip() if len(row) > 1 else '未知'
+                    sector = str(row[2]).strip() if len(row) > 2 else '未知'
+                    
+                    # 如果已存在於 company_info，更新資訊；否則新增
+                    if code in company_info:
+                        company_info[code]['name'] = name
+                        company_info[code]['sector'] = sector
+                    else:
+                        company_info[code] = {
+                            'name': name,
+                            'type': '上市',
+                            'sector': sector
+                        }
+        except Exception as e:
+            print(f"⚠️ 讀取 tse_concept_stocks.csv 失敗: {e}")
+
+    # 第三步：讀取基礎上櫃公司清單 otc_company_list.csv
+    otc_company_path = Path("otc_company_list.csv")
+    if otc_company_path.exists():
+        try:
+            otc_company_df = pd.read_csv(otc_company_path, header=None, dtype=str)
+            for _, row in otc_company_df.iterrows():
+                code = str(row[0]).strip()
+                if len(code) == 4 and code.isdigit():
+                    name = str(row[1]).strip() if len(row) > 1 else '未知'
+                    company_info[code] = {
+                        'name': name,
+                        'type': '上櫃',
+                        'sector': '未知'  # 預設值，會被概念股資料覆蓋
+                    }
+        except Exception as e:
+            print(f"⚠️ 讀取 otc_company_list.csv 失敗: {e}")
+
+    # 第四步：讀取上櫃概念股資料，補充或覆蓋資訊
+    otc_concept_path = Path("otc_concept_stocks.csv")
+    if otc_concept_path.exists():
+        try:
+            otc_df = pd.read_csv(otc_concept_path, header=None, dtype=str)
+            for _, row in otc_df.iterrows():
+                code = str(row[0]).strip()
+                if len(code) == 4 and code.isdigit():
+                    name = str(row[1]).strip() if len(row) > 1 else '未知'
+                    sector = str(row[2]).strip() if len(row) > 2 else '未知'
+                    
+                    # 如果已存在於 company_info，更新資訊；否則新增
+                    if code in company_info:
+                        company_info[code]['name'] = name
+                        company_info[code]['sector'] = sector
+                    else:
+                        company_info[code] = {
+                            'name': name,
+                            'type': '上櫃',
+                            'sector': sector
+                        }
+        except Exception as e:
+            print(f"⚠️ 讀取 otc_concept_stocks.csv 失敗: {e}")
 
     return company_info
 
 # ==============================
 # 📊 分析單檔股票
 # ==============================
-def analyze_stock(file_path):
+def analyze_stock(file_path, vol_lookback=None, vol_multiple=None, min_volume_threshold=None):
+    """
+    分析單檔股票是否符合條件
+    
+    參數:
+        file_path: CSV檔案路徑
+        vol_lookback: 爆量回看天數（None則使用全局 VOL_LOOKBACK）
+        vol_multiple: 爆量倍數（None則使用全局 VOL_MULTIPLE）
+        min_volume_threshold: 最低成交量門檻（None則使用全局 MIN_VOLUME_THRESHOLD）
+    """
+    # 使用傳入的參數，若無則使用全局參數
+    lookback = vol_lookback if vol_lookback is not None else VOL_LOOKBACK
+    multiple = vol_multiple if vol_multiple is not None else VOL_MULTIPLE
+    min_threshold = min_volume_threshold if min_volume_threshold is not None else MIN_VOLUME_THRESHOLD
+    
     try:
         df = pd.read_csv(
             file_path,
@@ -318,17 +409,18 @@ def analyze_stock(file_path):
         )
 
         df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
-        df['成交張數'] = pd.to_numeric(df['成交張數'], errors='coerce')
-        df['收盤價'] = pd.to_numeric(df['收盤價'], errors='coerce')
-        df['外陸資買賣超張數'] = pd.to_numeric(df['外陸資買賣超張數'], errors='coerce')
-        df['投信買賣超張數'] = pd.to_numeric(df['投信買賣超張數'], errors='coerce')
-        df['自營商買賣超張數'] = pd.to_numeric(df['自營商買賣超張數'], errors='coerce')
+        
+        # 移除千位分隔符逗號後再轉換數值
+        for col in ['成交張數', '收盤價', '外陸資買賣超張數', '投信買賣超張數', '自營商買賣超張數']:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.replace(',', '', regex=False)
+                df[col] = pd.to_numeric(df[col], errors='coerce')
 
         df.dropna(subset=['日期', '成交張數', '收盤價'], inplace=True)
         df.sort_values('日期', inplace=True)
         df.reset_index(drop=True, inplace=True)
 
-        if len(df) < max(VOL_LOOKBACK, PRICE_LOOKBACK):
+        if len(df) < max(lookback, PRICE_LOOKBACK):
             return None
 
         latest_date = df['日期'].iloc[-1].strftime('%Y-%m-%d')
@@ -338,10 +430,10 @@ def analyze_stock(file_path):
         meets_volume = True
         last_vol_val = None
         max_prev_vol = None
-        multiple = None
+        vol_multiple_result = None
 
         if FLAG_VOLUME_SPIKE:
-            recent_vol = df.tail(VOL_LOOKBACK)
+            recent_vol = df.tail(lookback)
             vols = recent_vol['成交張數'].values
             last_vol_val = vols[-1]
             prev_vols = vols[:-1]
@@ -352,12 +444,20 @@ def analyze_stock(file_path):
                 meets_volume = False
             else:
                 max_prev_vol = max(prev_vols)
-                if max_prev_vol <= 0 or last_vol_val < max_prev_vol * VOL_MULTIPLE:
+                if max_prev_vol <= 0 or last_vol_val < max_prev_vol * multiple:
                     meets_volume = False
                 else:
-                    multiple = round(last_vol_val / max_prev_vol, 2)
+                    vol_multiple_result = round(last_vol_val / max_prev_vol, 2)
         else:
             meets_volume = True
+
+        # ===== 檢查成交量門檻 =====
+        # 無論是否啟用爆量條件，都檢查最近一天成交量是否達到門檻
+        if last_vol_val is None:
+            last_vol_val = df['成交張數'].iloc[-1]
+        
+        if last_vol_val < min_threshold:
+            meets_volume = False
 
         # ===== 條件 2 + 3：紅三兵 + 三大法人 =====
         meets_red_three = True
@@ -418,7 +518,7 @@ def analyze_stock(file_path):
                 result.update({
                     'last_volume': int(last_vol_val),
                     'max_prev_volume': int(max_prev_vol),
-                    'multiple': multiple
+                    'multiple': vol_multiple_result
                 })
             if FLAG_RED_THREE:
                 result['closes'] = closes
@@ -433,7 +533,7 @@ def analyze_stock(file_path):
 # ==============================
 # 📈 生成單檔股票圖表
 # ==============================
-def generate_stock_chart(stock_code, stock_name, csv_file, output_folder, stock_type='未知', stock_sector='未知'):
+def generate_stock_chart(stock_code, stock_name, csv_file, output_folder, stock_type='未知', stock_sector='未知', industry_category=None):
     """生成單檔股票的HTML圖表，先分析後命名"""
     try:
         # 讀取資料
@@ -441,9 +541,12 @@ def generate_stock_chart(stock_code, stock_name, csv_file, output_folder, stock_
         
         # 轉換資料類型
         df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
+        
+        # 移除千位分隔符逗號後再轉換數值
         for col in ['開盤價', '最高價', '最低價', '收盤價', '成交張數',
                     '外陸資買賣超張數', '投信買賣超張數', '自營商買賣超張數']:
             if col in df.columns:
+                df[col] = df[col].astype(str).str.replace(',', '', regex=False)
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         
         df.dropna(subset=['日期'], inplace=True)
@@ -458,7 +561,15 @@ def generate_stock_chart(stock_code, stock_name, csv_file, output_folder, stock_
         
         # 根據操作建議決定檔案名稱（加入收盤價）
         action = analysis['action']
-        output_filename = f"{action}_{stock_code}_{stock_name}_{latest_close_str}.html"
+        
+        # 根據是否為概念股模式決定檔名格式
+        if industry_category:
+            # 概念股模式：產業分類_股票代號_股票名稱_最新收盤價_操作建議.html
+            output_filename = f"{industry_category}_{stock_code}_{stock_name}_{latest_close_str}_{action}.html"
+        else:
+            # 一般模式：操作建議_股票代號_股票名稱_收盤價.html
+            output_filename = f"{action}_{stock_code}_{stock_name}_{latest_close_str}.html"
+        
         output_path = output_folder / output_filename
         
         # 取最近60筆資料
@@ -845,9 +956,12 @@ def generate_stock_chart(stock_code, stock_name, csv_file, output_folder, stock_
         
         # 轉換資料類型
         df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
+        
+        # 移除千位分隔符逗號後再轉換數值
         for col in ['開盤價', '最高價', '最低價', '收盤價', '成交張數',
                     '外陸資買賣超張數', '投信買賣超張數', '自營商買賣超張數']:
             if col in df.columns:
+                df[col] = df[col].astype(str).str.replace(',', '', regex=False)
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         
         df.dropna(subset=['日期'], inplace=True)
@@ -1243,14 +1357,146 @@ def main():
         print(f"❌ 資料夾 '{FOLDER_PATH}' 不存在！")
         return
 
+    # 建立輸出資料夾
+    base_output_folder = Path(OUTPUT_CHARTS_FOLDER)
+    base_output_folder.mkdir(exist_ok=True)
+    
+    # 加載公司資訊
+    company_info = load_company_lists()
+    
+    # ==========================================
+    # 概念股模式
+    # ==========================================
+    if IS_CONCEPT_STOCK:
+        print(f"🎯 概念股模式啟動")
+        print(f"   • 收盤價門檻: ≤ {MAX_PRICE_CONCEPT_THRESHOLD} 元（高於此價格會被過濾）")
+        if FLAG_VOLUME_SPIKE:
+            print(f"   • 爆量條件: 回看{VOL_CONCEPT_LOOKBACK}天, 倍數{VOL_CONCEPT_MULTIPLE}x, 最低門檻{MIN_VOLUME_CONCEPT_THRESHOLD:,}張")
+        
+        # 從第一個CSV檔案讀取最新日期，用於建立日期資料夾
+        csv_files = list(folder.glob("*.csv"))
+        if not csv_files:
+            print(f"📁 資料夾 '{FOLDER_PATH}' 中沒有 .csv 檔案！")
+            return
+            
+        latest_date_str = None
+        try:
+            # 隨便讀取一個CSV來取得日期
+            sample_df = pd.read_csv(csv_files[0], encoding='utf-8', usecols=['日期'])
+            sample_df['日期'] = pd.to_datetime(sample_df['日期'], errors='coerce')
+            sample_df.dropna(subset=['日期'], inplace=True)
+            if len(sample_df) > 0:
+                latest_date = sample_df['日期'].max()
+                latest_date_str = latest_date.strftime('%Y.%m.%d')
+                print(f"📅 最新資料日期: {latest_date_str}")
+        except Exception as e:
+            print(f"⚠️ 無法讀取日期，使用當前日期: {e}")
+            from datetime import datetime
+            latest_date_str = datetime.now().strftime('%Y.%m.%d')
+        
+        # 建立以日期_All命名的子資料夾
+        output_folder = base_output_folder / f"{latest_date_str}_All"
+        output_folder.mkdir(exist_ok=True)
+        print(f"📁 輸出資料夾: {output_folder}\n")
+        
+        # 讀取概念股清單
+        concept_csv_path = Path(CONCEPT_STOCKS_CSV)
+        if not concept_csv_path.exists():
+            print(f"❌ 概念股清單檔案 '{CONCEPT_STOCKS_CSV}' 不存在！")
+            return
+        
+        try:
+            concept_df = pd.read_csv(concept_csv_path, encoding='utf-8')
+            print(f"📋 讀取到 {len(concept_df)} 檔概念股\n")
+            
+            chart_count = 0
+            filtered_count = 0
+            for idx, row in concept_df.iterrows():
+                industry = row['產業分類']
+                code = str(row['股票代碼'])
+                name = row['股票名稱']
+                
+                # 檢查股票數據檔案是否存在
+                csv_file_path = folder / f"{code}.csv"
+                if not csv_file_path.exists():
+                    print(f"⚠️  [{idx+1}/{len(concept_df)}] {industry} | {code} {name} - 數據檔案不存在")
+                    continue
+                
+                # 檢查最新收盤價是否符合門檻
+                try:
+                    temp_df = pd.read_csv(csv_file_path, encoding='utf-8', usecols=['日期', '收盤價'])
+                    temp_df['日期'] = pd.to_datetime(temp_df['日期'], errors='coerce')
+                    temp_df['收盤價'] = temp_df['收盤價'].astype(str).str.replace(',', '', regex=False)
+                    temp_df['收盤價'] = pd.to_numeric(temp_df['收盤價'], errors='coerce')
+                    temp_df.dropna(subset=['日期', '收盤價'], inplace=True)
+                    temp_df.sort_values('日期', inplace=True)
+                    
+                    if len(temp_df) == 0:
+                        print(f"⚠️  [{idx+1}/{len(concept_df)}] {industry} | {code} {name} - 無有效數據")
+                        continue
+                    
+                    latest_close = temp_df['收盤價'].iloc[-1]
+                    
+                    if latest_close > MAX_PRICE_CONCEPT_THRESHOLD:
+                        print(f"⏭️  [{idx+1}/{len(concept_df)}] {industry} | {code} {name} - 收盤價 {latest_close:.2f} 高於門檻 {MAX_PRICE_CONCEPT_THRESHOLD}")
+                        continue
+                except Exception as e:
+                    print(f"⚠️  [{idx+1}/{len(concept_df)}] {industry} | {code} {name} - 讀取數據失敗: {e}")
+                    continue
+                
+                # 如果啟用爆量過濾，則檢查是否符合條件
+                if FLAG_VOLUME_SPIKE:
+                    stock_result = analyze_stock(
+                        csv_file_path,
+                        vol_lookback=VOL_CONCEPT_LOOKBACK,
+                        vol_multiple=VOL_CONCEPT_MULTIPLE,
+                        min_volume_threshold=MIN_VOLUME_CONCEPT_THRESHOLD
+                    )
+                    if stock_result is None:
+                        print(f"⏭️  [{idx+1}/{len(concept_df)}] {industry} | {code} {name} - 不符合爆量條件")
+                        continue
+                    
+                    # 符合爆量條件，顯示詳細資訊
+                    print(f"📊 [{idx+1}/{len(concept_df)}] {industry} | {code} {name}")
+                    if 'last_volume' in stock_result:
+                        print(f"    ▲ 成交量: {stock_result['last_volume']:,} 張 (前高 {stock_result['max_prev_volume']:,}, {stock_result['multiple']}x)")
+                    filtered_count += 1
+                else:
+                    print(f"📊 [{idx+1}/{len(concept_df)}] {industry} | {code} {name}")
+                
+                # 生成圖表（存到日期_All資料夾）
+                type_str = company_info.get(code, {}).get('type', '未知')
+                sector = company_info.get(code, {}).get('sector', '未知')
+                
+                if generate_stock_chart(code, name, csv_file_path, output_folder, type_str, sector, industry_category=industry):
+                    chart_count += 1
+                
+                print()
+            
+            print("=" * 70)
+            print(f"✅ 概念股掃描完成：")
+            print(f"   • 總概念股數: {len(concept_df)}")
+            if FLAG_VOLUME_SPIKE:
+                print(f"   • 符合過濾條件（收盤價≤{MAX_PRICE_CONCEPT_THRESHOLD} 且爆量）: {filtered_count}")
+            else:
+                print(f"   • 符合收盤價門檻（≤{MAX_PRICE_CONCEPT_THRESHOLD}）: {chart_count}")
+            print(f"   • 成功生成圖表: {chart_count}")
+            print(f"   • 輸出資料夾: {output_folder}")
+            
+        except Exception as e:
+            print(f"❌ 讀取概念股清單失敗: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return
+    
+    # ==========================================
+    # 一般模式（原有邏輯）
+    # ==========================================
     csv_files = list(folder.glob("*.csv"))
     if not csv_files:
         print(f"📁 資料夾 '{FOLDER_PATH}' 中沒有 .csv 檔案！")
         return
-
-    # 建立輸出資料夾
-    base_output_folder = Path(OUTPUT_CHARTS_FOLDER)
-    base_output_folder.mkdir(exist_ok=True)
     
     # 從第一個CSV檔案讀取最新日期，用於建立日期資料夾
     latest_date_str = None
@@ -1272,9 +1518,6 @@ def main():
     output_folder = base_output_folder / latest_date_str
     output_folder.mkdir(exist_ok=True)
     print(f"📁 輸出資料夾: {output_folder}\n")
-
-    # 加載公司資訊
-    company_info = load_company_lists()
 
     enabled = []
     if FLAG_VOLUME_SPIKE: enabled.append("爆量")
