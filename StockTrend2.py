@@ -4,6 +4,7 @@ from pathlib import Path
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
+import sqlite3
 
 # ==============================
 # 🔧 【可控制的參數設定】
@@ -16,8 +17,9 @@ FLAG_NET_BUY = True        # 三大法人：3天中至少2天淨買超 > 0
 # 概念股模式
 IS_CONCEPT_STOCK = True   # 是否使用概念股模式
 
-# 資料夾路徑
-FOLDER_PATH = "stock_data"
+# 資料庫路徑
+DB_TSE_PATH = "stock_data/stock_tse.db"  # 上市股票資料庫
+DB_OTC_PATH = "stock_data/stock_otc.db"  # 上櫃股票資料庫
 OUTPUT_CHARTS_FOLDER = "output_charts"
 CONCEPT_STOCKS_CSV = "concept_stocks.csv"  # 概念股清單檔案
 
@@ -34,6 +36,140 @@ MAX_PRICE_CONCEPT_THRESHOLD = 50   # 最新收盤價最高門檻（元）- 高�
 
 # 紅三兵參數
 PRICE_LOOKBACK = 3         # 回看天數
+
+# ==============================
+# 📊 資料庫讀取函數
+# ==============================
+def read_stock_from_db(stock_code):
+    """
+    從資料庫讀取指定股票的資料
+    
+    Args:
+        stock_code: 股票代碼
+    
+    Returns:
+        DataFrame 或 None
+    """
+    # 先從上市資料庫查詢
+    df = None
+    db_path = None
+    
+    if Path(DB_TSE_PATH).exists():
+        try:
+            conn = sqlite3.connect(DB_TSE_PATH)
+            query = f"SELECT * FROM stock_data WHERE 股票代碼 = '{stock_code}' ORDER BY 日期"
+            df = pd.read_sql_query(query, conn)
+            conn.close()
+            if len(df) > 0:
+                db_path = DB_TSE_PATH
+        except Exception as e:
+            print(f"⚠️ 從 {DB_TSE_PATH} 讀取失敗: {e}")
+    
+    # 如果上市找不到，從上櫃資料庫查詢
+    if df is None or len(df) == 0:
+        if Path(DB_OTC_PATH).exists():
+            try:
+                conn = sqlite3.connect(DB_OTC_PATH)
+                query = f"SELECT * FROM stock_data WHERE 股票代碼 = '{stock_code}' ORDER BY 日期"
+                df = pd.read_sql_query(query, conn)
+                conn.close()
+                if len(df) > 0:
+                    db_path = DB_OTC_PATH
+            except Exception as e:
+                print(f"⚠️ 從 {DB_OTC_PATH} 讀取失敗: {e}")
+    
+    if df is None or len(df) == 0:
+        return None
+    
+    # 資料清理和轉換
+    df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
+    
+    # 轉換數值欄位（移除千分位符號）
+    numeric_columns = ['開盤價', '最高價', '最低價', '收盤價', '成交金額']
+    for col in numeric_columns:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace(',', '', regex=False)
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 成交張數已經是INTEGER，但可能需要確保是數值型態
+    if '成交張數' in df.columns:
+        df['成交張數'] = pd.to_numeric(df['成交張數'], errors='coerce')
+    
+    # 法人資料已經是REAL型態
+    institutional_columns = ['外陸資買賣超張數', '投信買賣超張數', '自營商買賣超張數']
+    for col in institutional_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 移除無效資料
+    df.dropna(subset=['日期'], inplace=True)
+    df.sort_values('日期', inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    
+    return df
+
+def get_all_stock_codes():
+    """
+    從資料庫獲取所有股票代碼
+    
+    Returns:
+        list: 股票代碼列表
+    """
+    codes = set()
+    
+    # 從上市資料庫讀取
+    if Path(DB_TSE_PATH).exists():
+        try:
+            conn = sqlite3.connect(DB_TSE_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT 股票代碼 FROM stock_data")
+            tse_codes = [row[0] for row in cursor.fetchall()]
+            codes.update(tse_codes)
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ 從 {DB_TSE_PATH} 讀取股票代碼失敗: {e}")
+    
+    # 從上櫃資料庫讀取
+    if Path(DB_OTC_PATH).exists():
+        try:
+            conn = sqlite3.connect(DB_OTC_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT 股票代碼 FROM stock_data")
+            otc_codes = [str(row[0]) for row in cursor.fetchall()]
+            codes.update(otc_codes)
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ 從 {DB_OTC_PATH} 讀取股票代碼失敗: {e}")
+    
+    return sorted(list(codes))
+
+def get_latest_date_from_db():
+    """
+    從資料庫獲取最新的日期
+    
+    Returns:
+        str: 最新日期字串 (YYYY.MM.DD)
+    """
+    latest_date = None
+    
+    # 從上市資料庫查詢
+    if Path(DB_TSE_PATH).exists():
+        try:
+            conn = sqlite3.connect(DB_TSE_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT MAX(日期) FROM stock_data")
+            result = cursor.fetchone()
+            if result and result[0]:
+                latest_date = pd.to_datetime(result[0]).strftime('%Y.%m.%d')
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ 從 {DB_TSE_PATH} 讀取最新日期失敗: {e}")
+    
+    if latest_date is None:
+        from datetime import datetime
+        latest_date = datetime.now().strftime('%Y.%m.%d')
+    
+    return latest_date
 
 # ==============================
 # 📈 量價戰法分析引擎
@@ -207,1192 +343,416 @@ def analyze_volume_price_pattern(df):
         elif all(vols[i] > vols[i+1] for i in range(3)):
             # 下跌梯量（縮量）
             if latest['收盤價'] < prev_3['收盤價']:
-                signals.append("💡 下跌梯量（機會）")
+                signals.append("✓ 下跌縮量（機會）")
                 action_score += 2
+    
+    # ===== 7. 法人動向 =====
+    if all(col in latest for col in ['外陸資買賣超張數', '投信買賣超張數', '自營商買賣超張數']):
+        foreign = latest['外陸資買賣超張數']
+        trust = latest['投信買賣超張數']
+        dealer = latest['自營商買賣超張數']
+        total_inst = foreign + trust + dealer
         
-        # 量大實體小
-        if is_high_volume and '開盤價' in latest and '收盤價' in latest:
-            body_size = abs(latest['收盤價'] - latest['開盤價'])
-            price_range = latest['最高價'] - latest['最低價'] if '最高價' in latest else body_size
-            if body_size < price_range * 0.3:
-                signals.append("⚠️ 量大實體小（有人跑）")
-                action_score -= 2
-                risk_factors.append("量大實體小")
+        if total_inst > 0:
+            if abs(total_inst) > 1000:
+                signals.append(f"💰 法人大買：{int(total_inst):,}張")
+                action_score += 3
+            else:
+                signals.append(f"💵 法人買超：{int(total_inst):,}張")
+                action_score += 1
+        elif total_inst < 0:
+            if abs(total_inst) > 1000:
+                signals.append(f"📤 法人大賣：{int(total_inst):,}張")
+                action_score -= 3
+                risk_factors.append("法人大賣")
+            else:
+                signals.append(f"📤 法人賣超：{int(total_inst):,}張")
+                action_score -= 1
     
-    # ===== 7. 連紅/連綠判斷 =====
-    if len(recent) >= 4 and '開盤價' in recent.columns and '收盤價' in recent.columns:
-        last_4 = recent.tail(4)
-        red_count = sum(last_4['收盤價'] > last_4['開盤價'])
-        
-        if red_count >= 4:
-            # 檢查第5天是否放量收綠
-            if len(recent) >= 5:
-                if latest['收盤價'] < latest['開盤價'] and is_high_volume:
-                    signals.append("🚨 連紅≥4天見綠放量（減倉）")
-                    action_score -= 4
-                    risk_factors.append("連紅後放量收綠")
-    
-    # ===== 8. 高量特殊規則 =====
-    if is_high_volume:
-        if high_volume_day == 1:
-            signals.append("📋 高量第1天：觀察為主")
-            action_score = 0
-        elif high_volume_day in [2, 3]:
-            if support_price and latest['收盤價'] > support_price:
-                if latest['收盤價'] > latest['開盤價']:
-                    signals.append("✨ 高量第2-3天支撐線上方（陽上陰觀）")
-                    action_score += 3
-    
-    # ===== 綜合判斷 =====
-    if action_score >= 5:
-        action = "上車"
-        risk_level = "低"
-    elif action_score >= 8:
-        action = "重倉"
-        risk_level = "低"
-    elif action_score <= -5:
-        action = "減倉"
-        risk_level = "高"
-    elif action_score <= -8:
-        action = "清倉"
-        risk_level = "高"
+    # ===== 最終判斷 =====
+    if action_score >= 8:
+        action = '重倉'
+        risk_level = '中'
+    elif action_score >= 4:
+        action = '上車'
+        risk_level = '低'
+    elif action_score <= -6:
+        action = '清倉'
+        risk_level = '高'
+    elif action_score <= -3:
+        action = '減倉'
+        risk_level = '中'
     else:
-        action = "觀望"
-        risk_level = "中"
+        action = '觀望'
+        risk_level = '中'
     
-    # 強制規則覆蓋
-    if "破支撐" in risk_factors:
-        action = "清倉"
-        risk_level = "高"
+    # 風險調整
+    if len(risk_factors) >= 2:
+        risk_level = '高'
+        if action in ['重倉', '上車']:
+            action = '觀望'
     
-    # 生成綜合分析
+    # 生成摘要
     summary_parts = []
     if signals:
-        summary_parts.append(f"發現 {len(signals)} 個信號")
+        summary_parts.append(f"{len(signals)}個信號")
     if risk_factors:
-        summary_parts.append(f"風險因子: {', '.join(risk_factors)}")
-    summary_parts.append(f"建議: {action}")
-    
-    summary = " | ".join(summary_parts)
+        summary_parts.append(f"風險點:{','.join(risk_factors)}")
+    summary = ' | '.join(summary_parts) if summary_parts else '正常'
     
     return {
         'signals': signals,
         'action': action,
         'risk_level': risk_level,
-        'summary': summary,
-        'score': action_score
+        'summary': summary
     }
 
 # ==============================
-# 🔧 讀取公司清單（無標題列）
+# 📊 公司資訊（類型/產業）
 # ==============================
-def load_company_lists():
+company_info = {}
+
+def load_company_info():
     """
-    讀取公司清單，優先順序：
-    1. tse_company_list.csv - 基礎上市公司資料（代碼、名稱）
-    2. tse_concept_stocks.csv - 上市概念股資料（代碼、名稱、概念股領域）
-    3. otc_company_list.csv - 基礎上櫃公司資料（代碼、名稱）
-    4. otc_concept_stocks.csv - 上櫃概念股資料（代碼、名稱、概念股領域）
+    從資料庫載入公司資訊（股票名稱）
     """
-    company_info = {}
-
-    # 第一步：讀取基礎上市公司清單 tse_company_list.csv
-    tse_company_path = Path("tse_company_list.csv")
-    if tse_company_path.exists():
+    global company_info
+    
+    # 從上市資料庫讀取
+    if Path(DB_TSE_PATH).exists():
         try:
-            tse_company_df = pd.read_csv(tse_company_path, header=None, dtype=str)
-            for _, row in tse_company_df.iterrows():
-                code = str(row[0]).strip()
-                if len(code) == 4 and code.isdigit():
-                    name = str(row[1]).strip() if len(row) > 1 else '未知'
-                    company_info[code] = {
-                        'name': name,
-                        'type': '上市',
-                        'sector': '未知'  # 預設值，會被概念股資料覆蓋
-                    }
+            conn = sqlite3.connect(DB_TSE_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT 股票代碼, 股票名稱 FROM stock_data")
+            for row in cursor.fetchall():
+                code, name = str(row[0]), row[1]
+                company_info[code] = {
+                    'name': name,
+                    'type': '上市',
+                    'sector': '未知'
+                }
+            conn.close()
         except Exception as e:
-            print(f"⚠️ 讀取 tse_company_list.csv 失敗: {e}")
-
-    # 第二步：讀取上市概念股資料，補充或覆蓋資訊
-    tse_concept_path = Path("tse_concept_stocks.csv")
-    if tse_concept_path.exists():
+            print(f"⚠️ 從 {DB_TSE_PATH} 讀取公司資訊失敗: {e}")
+    
+    # 從上櫃資料庫讀取
+    if Path(DB_OTC_PATH).exists():
         try:
-            tse_df = pd.read_csv(tse_concept_path, header=None, dtype=str)
-            for _, row in tse_df.iterrows():
-                code = str(row[0]).strip()
-                if len(code) == 4 and code.isdigit():
-                    name = str(row[1]).strip() if len(row) > 1 else '未知'
-                    sector = str(row[2]).strip() if len(row) > 2 else '未知'
-                    
-                    # 如果已存在於 company_info，更新資訊；否則新增
-                    if code in company_info:
-                        company_info[code]['name'] = name
-                        company_info[code]['sector'] = sector
-                    else:
-                        company_info[code] = {
-                            'name': name,
-                            'type': '上市',
-                            'sector': sector
-                        }
-        except Exception as e:
-            print(f"⚠️ 讀取 tse_concept_stocks.csv 失敗: {e}")
-
-    # 第三步：讀取基礎上櫃公司清單 otc_company_list.csv
-    otc_company_path = Path("otc_company_list.csv")
-    if otc_company_path.exists():
-        try:
-            otc_company_df = pd.read_csv(otc_company_path, header=None, dtype=str)
-            for _, row in otc_company_df.iterrows():
-                code = str(row[0]).strip()
-                if len(code) == 4 and code.isdigit():
-                    name = str(row[1]).strip() if len(row) > 1 else '未知'
+            conn = sqlite3.connect(DB_OTC_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT 股票代碼, 股票名稱 FROM stock_data")
+            for row in cursor.fetchall():
+                code, name = str(row[0]), row[1]
+                if code not in company_info:  # 優先保留上市資訊
                     company_info[code] = {
                         'name': name,
                         'type': '上櫃',
-                        'sector': '未知'  # 預設值，會被概念股資料覆蓋
+                        'sector': '未知'
                     }
+            conn.close()
         except Exception as e:
-            print(f"⚠️ 讀取 otc_company_list.csv 失敗: {e}")
-
-    # 第四步：讀取上櫃概念股資料，補充或覆蓋資訊
-    otc_concept_path = Path("otc_concept_stocks.csv")
-    if otc_concept_path.exists():
-        try:
-            otc_df = pd.read_csv(otc_concept_path, header=None, dtype=str)
-            for _, row in otc_df.iterrows():
-                code = str(row[0]).strip()
-                if len(code) == 4 and code.isdigit():
-                    name = str(row[1]).strip() if len(row) > 1 else '未知'
-                    sector = str(row[2]).strip() if len(row) > 2 else '未知'
-                    
-                    # 如果已存在於 company_info，更新資訊；否則新增
-                    if code in company_info:
-                        company_info[code]['name'] = name
-                        company_info[code]['sector'] = sector
-                    else:
-                        company_info[code] = {
-                            'name': name,
-                            'type': '上櫃',
-                            'sector': sector
-                        }
-        except Exception as e:
-            print(f"⚠️ 讀取 otc_concept_stocks.csv 失敗: {e}")
-
-    return company_info
+            print(f"⚠️ 從 {DB_OTC_PATH} 讀取公司資訊失敗: {e}")
 
 # ==============================
-# 📊 分析單檔股票
+# 📊 股票篩選 - 爆量檢測
 # ==============================
-def analyze_stock(file_path, vol_lookback=None, vol_multiple=None, min_volume_threshold=None):
-    """
-    分析單檔股票是否符合條件
+def check_volume_spike(df, lookback=VOL_LOOKBACK, multiple=VOL_MULTIPLE, min_threshold=MIN_VOLUME_THRESHOLD):
+    """檢查是否符合爆量條件"""
+    if '成交張數' not in df.columns or len(df) < lookback + 1:
+        return None
     
-    參數:
-        file_path: CSV檔案路徑
-        vol_lookback: 爆量回看天數（None則使用全局 VOL_LOOKBACK）
-        vol_multiple: 爆量倍數（None則使用全局 VOL_MULTIPLE）
-        min_volume_threshold: 最低成交量門檻（None則使用全局 MIN_VOLUME_THRESHOLD）
-    """
-    # 使用傳入的參數，若無則使用全局參數
-    lookback = vol_lookback if vol_lookback is not None else VOL_LOOKBACK
-    multiple = vol_multiple if vol_multiple is not None else VOL_MULTIPLE
-    min_threshold = min_volume_threshold if min_volume_threshold is not None else MIN_VOLUME_THRESHOLD
+    last_volume = df['成交張數'].iloc[-1]
+    if pd.isna(last_volume) or last_volume < min_threshold:
+        return None
     
-    try:
-        df = pd.read_csv(
-            file_path,
-            usecols=[
-                '日期', '成交張數', '收盤價',
-                '外陸資買賣超張數', '投信買賣超張數', '自營商買賣超張數'
-            ],
-            encoding='utf-8'
-        )
-
-        df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
-        
-        # 移除千位分隔符逗號後再轉換數值
-        for col in ['成交張數', '收盤價', '外陸資買賣超張數', '投信買賣超張數', '自營商買賣超張數']:
-            if col in df.columns:
-                df[col] = df[col].astype(str).str.replace(',', '', regex=False)
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        df.dropna(subset=['日期', '成交張數', '收盤價'], inplace=True)
-        df.sort_values('日期', inplace=True)
-        df.reset_index(drop=True, inplace=True)
-
-        if len(df) < max(lookback, PRICE_LOOKBACK):
-            return None
-
-        latest_date = df['日期'].iloc[-1].strftime('%Y-%m-%d')
-        latest_close = df['收盤價'].iloc[-1]
-
-        # ===== 條件 1：爆量 =====
-        meets_volume = True
-        last_vol_val = None
-        max_prev_vol = None
-        vol_multiple_result = None
-
-        if FLAG_VOLUME_SPIKE:
-            recent_vol = df.tail(lookback)
-            vols = recent_vol['成交張數'].values
-            last_vol_val = vols[-1]
-            prev_vols = vols[:-1]
-
-            if not (last_vol_val > 0 and all(v > 0 for v in prev_vols)):
-                meets_volume = False
-            elif not all(last_vol_val > v for v in prev_vols):
-                meets_volume = False
-            else:
-                max_prev_vol = max(prev_vols)
-                if max_prev_vol <= 0 or last_vol_val < max_prev_vol * multiple:
-                    meets_volume = False
-                else:
-                    vol_multiple_result = round(last_vol_val / max_prev_vol, 2)
-        else:
-            meets_volume = True
-
-        # ===== 檢查成交量門檻 =====
-        # 無論是否啟用爆量條件，都檢查最近一天成交量是否達到門檻
-        if last_vol_val is None:
-            last_vol_val = df['成交張數'].iloc[-1]
-        
-        if last_vol_val < min_threshold:
-            meets_volume = False
-
-        # ===== 條件 2 + 3：紅三兵 + 三大法人 =====
-        meets_red_three = True
-        meets_net_buy = True
-        closes = None
-        net_summary = None
-
-        if FLAG_RED_THREE or FLAG_NET_BUY:
-            recent_df = df.tail(PRICE_LOOKBACK)
-            if len(recent_df) != PRICE_LOOKBACK:
-                meets_red_three = False
-                meets_net_buy = False
-            else:
-                prices = recent_df['收盤價'].values
-                c1, c2, c3 = prices[0], prices[1], prices[2]
-                closes = (round(c1, 2), round(c2, 2), round(c3, 2))
-
-                if FLAG_RED_THREE:
-                    if not (c1 < c2 < c3):
-                        meets_red_three = False
-                else:
-                    meets_red_three = True
-
-                if FLAG_NET_BUY:
-                    foreign = recent_df['外陸資買賣超張數'].values
-                    trust = recent_df['投信買賣超張數'].values
-                    dealer = recent_df['自營商買賣超張數'].values
-
-                    positive_days = 0
-                    details = []
-
-                    for f, t, d in zip(foreign, trust, dealer):
-                        total = f + t + d
-                        if total > 0:
-                            positive_days += 1
-                        details.append((f, t, d, total))
-
-                    net_summary = {
-                        'details': details,
-                        'positive_days': positive_days
-                    }
-
-                    if positive_days < 2:
-                        meets_net_buy = False
-                else:
-                    meets_net_buy = True
-        else:
-            meets_red_three = True
-            meets_net_buy = True
-
-        if meets_volume and meets_red_three and meets_net_buy:
-            result = {
-                'code': file_path.stem,
-                'latest_date': latest_date,
-                'latest_close': latest_close,
-            }
-            if FLAG_VOLUME_SPIKE:
-                result.update({
-                    'last_volume': int(last_vol_val),
-                    'max_prev_volume': int(max_prev_vol),
-                    'multiple': vol_multiple_result
-                })
-            if FLAG_RED_THREE:
-                result['closes'] = closes
-            if FLAG_NET_BUY:
-                result['net_summary'] = net_summary
-            return result
-
-    except Exception as e:
-        print(f"⚠️ 處理 {file_path.name} 時出錯: {e}")
+    prev_volumes = df['成交張數'].iloc[-(lookback+1):-1]
+    prev_volumes = prev_volumes[prev_volumes.notna()]
+    
+    if len(prev_volumes) == 0:
+        return None
+    
+    max_prev_volume = prev_volumes.max()
+    if last_volume >= max_prev_volume * multiple:
+        return {
+            'last_volume': int(last_volume),
+            'max_prev_volume': int(max_prev_volume),
+            'multiple': f"{last_volume / max_prev_volume:.2f}"
+        }
     return None
 
 # ==============================
-# 📈 生成單檔股票圖表
+# 📊 股票篩選 - 紅三兵檢測
 # ==============================
-def generate_stock_chart(stock_code, stock_name, csv_file, output_folder, stock_type='未知', stock_sector='未知', industry_category=None):
-    """生成單檔股票的HTML圖表，先分析後命名"""
+def check_red_three(df, lookback=PRICE_LOOKBACK):
+    """檢查是否為紅三兵"""
+    if '收盤價' not in df.columns or len(df) < lookback:
+        return None
+    
+    closes = df['收盤價'].iloc[-lookback:].values
+    if any(pd.isna(closes)):
+        return None
+    
+    if all(closes[i] < closes[i+1] for i in range(lookback - 1)):
+        return {'closes': [f"{c:.2f}" for c in closes]}
+    return None
+
+# ==============================
+# 📊 股票篩選 - 法人淨買超檢測
+# ==============================
+def check_net_buy(df, lookback=PRICE_LOOKBACK):
+    """檢查3天中至少2天法人總和淨買超 > 0"""
+    required_cols = ['外陸資買賣超張數', '投信買賣超張數', '自營商買賣超張數']
+    if not all(c in df.columns for c in required_cols) or len(df) < lookback:
+        return None
+    
+    last_n = df[required_cols].iloc[-lookback:]
+    
+    details = []
+    positive_count = 0
+    for _, row in last_n.iterrows():
+        foreign = row['外陸資買賣超張數'] if not pd.isna(row['外陸資買賣超張數']) else 0
+        trust = row['投信買賣超張數'] if not pd.isna(row['投信買賣超張數']) else 0
+        dealer = row['自營商買賣超張數'] if not pd.isna(row['自營商買賣超張數']) else 0
+        total = foreign + trust + dealer
+        if total > 0:
+            positive_count += 1
+        details.append((foreign, trust, dealer, total))
+    
+    if positive_count >= 2:
+        return {
+            'positive_days': positive_count,
+            'details': details
+        }
+    return None
+
+# ==============================
+# 📈 主篩選函數
+# ==============================
+def analyze_stock(stock_code_or_df, vol_lookback=VOL_LOOKBACK, vol_multiple=VOL_MULTIPLE, min_volume_threshold=MIN_VOLUME_THRESHOLD):
+    """
+    分析單一股票
+    
+    Args:
+        stock_code_or_df: 股票代碼(str) 或 DataFrame
+        vol_lookback: 爆量回看天數
+        vol_multiple: 爆量倍數
+        min_volume_threshold: 最低成交量門檻
+    
+    Returns:
+        dict 或 None
+    """
+    # 讀取資料
+    if isinstance(stock_code_or_df, str):
+        df = read_stock_from_db(stock_code_or_df)
+        stock_code = stock_code_or_df
+    elif isinstance(stock_code_or_df, pd.DataFrame):
+        df = stock_code_or_df
+        stock_code = df['股票代碼'].iloc[0] if '股票代碼' in df.columns else 'unknown'
+    else:
+        return None
+    
+    if df is None or len(df) < 5:
+        return None
+    
+    result = {'code': str(stock_code)}
+    
+    # 獲取最新日期和收盤價
+    if '日期' in df.columns:
+        result['latest_date'] = df['日期'].iloc[-1].strftime('%Y-%m-%d')
+    if '收盤價' in df.columns:
+        result['latest_close'] = df['收盤價'].iloc[-1]
+    
+    # 檢查各項條件
+    passes = True
+    
+    if FLAG_VOLUME_SPIKE:
+        vol_result = check_volume_spike(df, vol_lookback, vol_multiple, min_volume_threshold)
+        if vol_result:
+            result.update(vol_result)
+        else:
+            passes = False
+    
+    if FLAG_RED_THREE and passes:
+        red_result = check_red_three(df)
+        if red_result:
+            result.update(red_result)
+        else:
+            passes = False
+    
+    if FLAG_NET_BUY and passes:
+        net_result = check_net_buy(df)
+        if net_result:
+            result['net_summary'] = net_result
+        else:
+            passes = False
+    
+    return result if passes else None
+
+# ==============================
+# 🎨 圖表生成函數
+# ==============================
+def generate_stock_chart(code, name, stock_df_or_code, output_folder, type_str='', sector='', industry_category=None):
+    """
+    生成股票K線圖（含量價戰法分析）
+    
+    Args:
+        code: 股票代碼
+        name: 股票名稱
+        stock_df_or_code: DataFrame 或股票代碼
+        output_folder: 輸出資料夾
+        type_str: 類型（上市/上櫃）
+        sector: 產業類別
+        industry_category: 概念股產業分類
+    
+    Returns:
+        bool: 是否成功生成
+    """
     try:
         # 讀取資料
-        df = pd.read_csv(csv_file, encoding='utf-8')
+        if isinstance(stock_df_or_code, pd.DataFrame):
+            df = stock_df_or_code.copy()
+        else:
+            df = read_stock_from_db(stock_df_or_code)
         
-        # 轉換資料類型
-        df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
+        if df is None or len(df) < 20:
+            print(f"        ⚠️ {code} {name} 資料不足，無法生成圖表")
+            return False
         
-        # 移除千位分隔符逗號後再轉換數值
-        for col in ['開盤價', '最高價', '最低價', '收盤價', '成交張數',
-                    '外陸資買賣超張數', '投信買賣超張數', '自營商買賣超張數']:
-            if col in df.columns:
-                df[col] = df[col].astype(str).str.replace(',', '', regex=False)
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+        # 確保資料按日期排序
+        df = df.sort_values('日期').reset_index(drop=True)
         
-        df.dropna(subset=['日期'], inplace=True)
-        df.sort_values('日期', inplace=True)
+        # 取最近60天資料（如果有的話）
+        df_chart = df.tail(60).copy()
         
-        # 取得最後一天收盤價
-        latest_close = df['收盤價'].iloc[-1]
-        latest_close_str = f"{latest_close:.2f}"
+        # 執行量價戰法分析
+        analysis = analyze_volume_price_pattern(df_chart)
         
-        # ===== 先執行量價分析 =====
-        analysis = analyze_volume_price_pattern(df)
+        # 建立圖表
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.03,
+            row_heights=[0.7, 0.3],
+            subplot_titles=(f'{code} {name} - K線圖 【{analysis["action"]}】風險:{analysis["risk_level"]}', '成交量')
+        )
         
-        # 根據操作建議決定檔案名稱（加入收盤價）
-        action = analysis['action']
+        # K線圖
+        fig.add_trace(
+            go.Candlestick(
+                x=df_chart['日期'],
+                open=df_chart['開盤價'],
+                high=df_chart['最高價'],
+                low=df_chart['最低價'],
+                close=df_chart['收盤價'],
+                name='K線',
+                increasing_line_color='red',
+                decreasing_line_color='green'
+            ),
+            row=1, col=1
+        )
         
-        # 根據是否為概念股模式決定檔名格式
+        # 成交量柱狀圖
+        colors = ['red' if df_chart['收盤價'].iloc[i] >= df_chart['開盤價'].iloc[i] else 'green'
+                  for i in range(len(df_chart))]
+        
+        fig.add_trace(
+            go.Bar(
+                x=df_chart['日期'],
+                y=df_chart['成交張數'],
+                name='成交量',
+                marker_color=colors,
+                showlegend=False
+            ),
+            row=2, col=1
+        )
+        
+        # 更新佈局
+        title_parts = [f'{code} {name}']
+        if type_str:
+            title_parts.append(f'[{type_str}]')
+        if sector and sector != '未知':
+            title_parts.append(f'{sector}')
         if industry_category:
-            # 概念股模式：產業分類_股票代號_股票名稱_最新收盤價_操作建議.html
-            output_filename = f"{industry_category}_{stock_code}_{stock_name}_{latest_close_str}_{action}.html"
-        else:
-            # 一般模式：操作建議_股票代號_股票名稱_收盤價.html
-            output_filename = f"{action}_{stock_code}_{stock_name}_{latest_close_str}.html"
+            title_parts.append(f'【{industry_category}】')
         
-        output_path = output_folder / output_filename
+        title_parts.append(f'<br>操作建議: <b>{analysis["action"]}</b>')
+        title_parts.append(f'風險等級: {analysis["risk_level"]}')
         
-        # 取最近60筆資料
-        df_chart = df.tail(60).copy()
-        
-        # 計算移動平均線
-        df_chart['MA5'] = df_chart['收盤價'].rolling(window=5, min_periods=1).mean()
-        df_chart['MA10'] = df_chart['收盤價'].rolling(window=10, min_periods=1).mean()
-        
-        # 創建子圖
-        fig = make_subplots(
-            rows=4, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.03,
-            subplot_titles=('', '', '', ''),
-            row_heights=[0.4, 0.2, 0.2, 0.2],
-            specs=[[{"secondary_y": False}],
-                   [{"secondary_y": False}],
-                   [{"secondary_y": False}],
-                   [{"secondary_y": False}]]
-        )
-        
-        # 第一層：K線圖
-        fig.add_trace(
-            go.Candlestick(
-                x=df_chart['日期'],
-                open=df_chart['開盤價'],
-                high=df_chart['最高價'],
-                low=df_chart['最低價'],
-                close=df_chart['收盤價'],
-                name='K線',
-                increasing_line_color='#FF5252',
-                increasing_fillcolor='#FF5252',
-                decreasing_line_color='#00C851',
-                decreasing_fillcolor='#00C851',
-                line=dict(width=0.8),
-            ),
-            row=1, col=1
-        )
-        
-        # 添加MA5和MA10
-        for ma_name, ma_col, color in [('MA5', 'MA5', 'blue'), ('MA10', 'MA10', 'orange')]:
-            if ma_col in df_chart.columns and df_chart[ma_col].notna().sum() > 0:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_chart['日期'],
-                        y=df_chart[ma_col],
-                        name=ma_name,
-                        line=dict(color=color, width=1.5),
-                        mode='lines',
-                    ),
-                    row=1, col=1
-                )
-        
-        # 第二層：成交量
-        if '成交張數' in df_chart.columns:
-            volume_lots = pd.to_numeric(df_chart['成交張數'], errors='coerce')
-            colors = []
-            for i in range(len(df_chart)):
-                if i == 0:
-                    if df_chart['收盤價'].iloc[i] >= df_chart['開盤價'].iloc[i]:
-                        colors.append('rgba(255, 82, 82, 0.8)')
-                    else:
-                        colors.append('rgba(0, 200, 81, 0.8)')
-                else:
-                    if df_chart['收盤價'].iloc[i] >= df_chart['收盤價'].iloc[i-1]:
-                        colors.append('rgba(255, 82, 82, 0.8)')
-                    else:
-                        colors.append('rgba(0, 200, 81, 0.8)')
-            
-            fig.add_trace(
-                go.Bar(
-                    x=df_chart['日期'],
-                    y=volume_lots,
-                    name='成交量',
-                    marker=dict(color=colors, line=dict(width=0)),
-                    showlegend=True
-                ),
-                row=2, col=1
-            )
-        
-        # 第三層：三大法人當日買賣超
-        has_institutional = False
-        if '外陸資買賣超張數' in df_chart.columns:
-            foreign = pd.to_numeric(df_chart['外陸資買賣超張數'], errors='coerce')
-            trust = pd.to_numeric(df_chart.get('投信買賣超張數', 0), errors='coerce')
-            dealer = pd.to_numeric(df_chart.get('自營商買賣超張數', 0), errors='coerce')
-            
-            if foreign.notna().sum() > 0 or trust.notna().sum() > 0 or dealer.notna().sum() > 0:
-                has_institutional = True
-                for name, data, color in [
-                    ('外資', foreign, 'rgba(255, 82, 82, 0.75)'),
-                    ('投信', trust, 'rgba(0, 200, 81, 0.75)'),
-                    ('自營商', dealer, 'rgba(0, 191, 255, 0.75)')
-                ]:
-                    fig.add_trace(
-                        go.Bar(
-                            x=df_chart['日期'],
-                            y=data,
-                            name=name,
-                            marker_color=color,
-                            legendgroup=name,
-                            showlegend=True
-                        ),
-                        row=3, col=1
-                    )
-        
-        # 第四層：三大法人累積買賣超
-        if has_institutional:
-            foreign_cumsum = pd.to_numeric(df_chart['外陸資買賣超張數'], errors='coerce').fillna(0).cumsum()
-            trust_cumsum = pd.to_numeric(df_chart.get('投信買賣超張數', 0), errors='coerce').fillna(0).cumsum()
-            dealer_cumsum = pd.to_numeric(df_chart.get('自營商買賣超張數', 0), errors='coerce').fillna(0).cumsum()
-            
-            for name, data, color in [
-                ('外資', foreign_cumsum, 'rgb(255, 82, 82)'),
-                ('投信', trust_cumsum, 'rgb(0, 200, 81)'),
-                ('自營商', dealer_cumsum, 'rgb(0, 191, 255)')
-            ]:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_chart['日期'],
-                        y=data,
-                        name=f'{name}累積',
-                        line=dict(color=color, width=2.5, shape='spline', smoothing=0.8),
-                        mode='lines',
-                        legendgroup=name,
-                        showlegend=True
-                    ),
-                    row=4, col=1
-                )
-        
-        # 計算統計數據
-        latest = df_chart.iloc[-1]
-        latest_date_str = latest['日期'].strftime('%Y-%m-%d')
-        stats = {
-            '成交量': latest['成交張數'] if '成交張數' in latest and pd.notna(latest['成交張數']) else 0,
-            '外資累積': foreign_cumsum.iloc[-1] if has_institutional and len(foreign_cumsum) > 0 else 0,
-            '投信累積': trust_cumsum.iloc[-1] if has_institutional and len(trust_cumsum) > 0 else 0,
-            '自營累積': dealer_cumsum.iloc[-1] if has_institutional and len(dealer_cumsum) > 0 else 0,
-        }
-        
-        # 更新佈局
-        stats_line1 = (
-            f"最新資料日期: {latest_date_str} | "
-            f"外資累積: {stats['外資累積']:,.0f}張 | "
-            f"投信累積: {stats['投信累積']:,.0f}張 | "
-            f"自營累積: {stats['自營累積']:,.0f}張"
-        )
-        stats_line2 = f"股價K線圖 | 成交量: {stats['成交量']:,.0f}張"
+        if analysis['signals']:
+            signals_text = '<br>' + '<br>'.join(analysis['signals'][:5])  # 最多顯示5個信號
+            title_parts.append(signals_text)
         
         fig.update_layout(
-            title=dict(
-                text=f'{stock_code} {stock_name} ({stock_type} | {stock_sector}) 技術分析圖表 (最近60筆)<br><sub>{stats_line1}</sub><br><sub>{stats_line2}</sub>',
-                x=0.5,
-                xanchor='center',
-                font=dict(size=16, family='Microsoft JhengHei, Arial, sans-serif')
-            ),
+            title=' '.join(title_parts),
             xaxis_rangeslider_visible=False,
-            height=1500,
+            height=800,
             showlegend=True,
-            hovermode='x unified',
-            template='plotly_white',
-            barmode='relative',
-            legend=dict(
-                orientation="v",
-                yanchor="top",
-                y=0.98,
-                xanchor="left",
-                x=0.01,
-                bgcolor="rgba(255, 255, 255, 0.8)",
-                bordercolor="lightgray",
-                borderwidth=1,
-                font=dict(family='Microsoft JhengHei, Arial, sans-serif')
-            ),
-            font=dict(family='Microsoft JhengHei, Arial, sans-serif'),
-            dragmode='pan'
+            hovermode='x unified'
         )
         
-        # 更新Y軸
-        price_cols = ['開盤價', '最高價', '最低價', '收盤價']
-        price_min = df_chart[price_cols].min().min()
-        price_max = df_chart[price_cols].max().max()
-        price_margin = (price_max - price_min) * 0.05
-        price_range = [price_min - price_margin, price_max + price_margin]
+        fig.update_xaxes(title_text="日期", row=2, col=1)
+        fig.update_yaxes(title_text="價格", row=1, col=1)
+        fig.update_yaxes(title_text="張數", row=2, col=1)
         
-        fig.update_yaxes(title_text="股價 (元)", row=1, col=1, range=price_range, fixedrange=True)
-        fig.update_yaxes(title_text="成交量 (張)", row=2, col=1, tickformat=",", fixedrange=True)
-        fig.update_yaxes(title_text="當日買賣超 (張)", row=3, col=1, tickformat=",", fixedrange=True)
-        fig.update_yaxes(title_text="累積買賣超 (張)", row=4, col=1, tickformat=",", fixedrange=True)
-        
-        # 更新X軸 - 移除非交易日空隙
-        start_date = df_chart['日期'].min()
-        end_date = df_chart['日期'].max()
-        trading_dates = df_chart['日期'].tolist()
-        
-        # 生成刻度值（每月1、6、11、16、21、26日）
-        tickvals = []
-        current = start_date.replace(day=1)
-        while current <= end_date:
-            for day in [1, 6, 11, 16, 21, 26]:
-                try:
-                    tick_date = current.replace(day=day)
-                    if start_date <= tick_date <= end_date:
-                        tickvals.append(tick_date)
-                except:
-                    pass
-            if current.month == 12:
-                current = current.replace(year=current.year + 1, month=1)
-            else:
-                current = current.replace(month=current.month + 1)
-        
-        for i in range(1, 5):
-            fig.update_xaxes(
-                tickformat="%m-%d",
-                tickangle=-45,
-                tickmode='array',
-                tickvals=tickvals,
-                showticklabels=True,
-                autorange=True,
-                hoverformat="%m-%d",
-                fixedrange=True,
-                rangebreaks=[
-                    dict(values=pd.date_range(start=start_date, end=end_date, freq='D')
-                         .difference(pd.DatetimeIndex(trading_dates)).tolist())
-                ],
-                row=i, col=1
-            )
-        
-        # 生成HTML
-        html_string = fig.to_html(include_plotlyjs='cdn')
-        
-        # 生成分析區塊的HTML
-        # 根據操作建議選擇顏色
-        action_colors = {
-            '重倉': '#FF4444',
-            '上車': '#00C851',
-            '觀望': '#FFA500',
-            '減倉': '#FF8800',
-            '清倉': '#CC0000'
-        }
-        action_color = action_colors.get(analysis['action'], '#666666')
-        
-        # 根據風險等級選擇顏色
-        risk_colors = {
-            '低': '#00C851',
-            '中': '#FFA500',
-            '高': '#FF4444'
-        }
-        risk_color = risk_colors.get(analysis['risk_level'], '#666666')
-        
-        # 生成信號列表HTML
-        signals_html = ""
-        if analysis['signals']:
-            signals_html = "<ul style='margin: 10px 0; padding-left: 25px; line-height: 1.8;'>"
-            for signal in analysis['signals']:
-                signals_html += f"<li style='margin: 5px 0;'>{signal}</li>"
-            signals_html += "</ul>"
-        else:
-            signals_html = "<p style='color: #999; font-style: italic;'>暫無明確信號</p>"
-        
-        # 評分進度條
-        score = analysis['score']
-        # 將評分映射到 0-100 的進度條（-10到10映射到0-100）
-        progress = min(100, max(0, (score + 10) * 5))
-        
-        # 根據評分選擇進度條顏色
-        if score >= 5:
-            progress_color = '#00C851'  # 綠色
-        elif score >= 0:
-            progress_color = '#FFA500'  # 橙色
-        elif score >= -5:
-            progress_color = '#FF8800'  # 深橙
-        else:
-            progress_color = '#FF4444'  # 紅色
-        
-        analysis_block = f'''
-<div style="max-width: 1200px; margin: 30px auto; padding: 20px; font-family: 'Microsoft JhengHei', Arial, sans-serif;">
-    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px 10px 0 0; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-        <h2 style="margin: 0; font-size: 24px; display: flex; align-items: center;">
-            <span style="font-size: 30px; margin-right: 10px;">📊</span>
-            量價戰法分析
-        </h2>
-        <p style="margin: 5px 0 0 0; font-size: 14px; opacity: 0.9;">基於量價關係、K線型態、趨勢判斷的綜合分析</p>
-    </div>
-    
-    <div style="background: white; padding: 25px; border: 1px solid #e0e0e0; border-top: none; border-radius: 0 0 10px 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-        <!-- 核心指標卡片 -->
-        <div style="display: flex; gap: 15px; margin-bottom: 25px; flex-wrap: wrap;">
-            <!-- 操作建議卡 -->
-            <div style="flex: 1; min-width: 200px; background: linear-gradient(135deg, {action_color}15, {action_color}25); border-left: 4px solid {action_color}; padding: 15px; border-radius: 8px;">
-                <div style="font-size: 12px; color: #666; margin-bottom: 5px;">💡 操作建議</div>
-                <div style="font-size: 28px; font-weight: bold; color: {action_color};">{analysis['action']}</div>
-            </div>
-            
-            <!-- 風險等級卡 -->
-            <div style="flex: 1; min-width: 200px; background: linear-gradient(135deg, {risk_color}15, {risk_color}25); border-left: 4px solid {risk_color}; padding: 15px; border-radius: 8px;">
-                <div style="font-size: 12px; color: #666; margin-bottom: 5px;">⚠️ 風險等級</div>
-                <div style="font-size: 28px; font-weight: bold; color: {risk_color};">{analysis['risk_level']}</div>
-            </div>
-            
-            <!-- 評分卡 -->
-            <div style="flex: 1; min-width: 200px; background: linear-gradient(135deg, {progress_color}15, {progress_color}25); border-left: 4px solid {progress_color}; padding: 15px; border-radius: 8px;">
-                <div style="font-size: 12px; color: #666; margin-bottom: 5px;">📈 綜合評分</div>
-                <div style="font-size: 28px; font-weight: bold; color: {progress_color};">{score} 分</div>
-                <div style="background: #e0e0e0; height: 8px; border-radius: 4px; margin-top: 8px; overflow: hidden;">
-                    <div style="background: {progress_color}; height: 100%; width: {progress}%; transition: width 0.3s ease;"></div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- 信號列表 -->
-        <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; border: 1px solid #e9ecef;">
-            <h3 style="margin: 0 0 15px 0; font-size: 18px; color: #333; display: flex; align-items: center;">
-                <span style="font-size: 22px; margin-right: 8px;">🔍</span>
-                技術信號分析
-            </h3>
-            {signals_html}
-        </div>
-        
-        <!-- 評分說明 -->
-        <div style="margin-top: 20px; padding: 15px; background: #fff3cd; border-left: 4px solid #ffc107; border-radius: 4px;">
-            <div style="font-size: 14px; color: #856404; line-height: 1.6;">
-                <strong>📖 評分標準：</strong>
-                <span style="display: inline-block; margin: 0 10px;">≥8分=重倉</span>
-                <span style="display: inline-block; margin: 0 10px;">5-7分=上車</span>
-                <span style="display: inline-block; margin: 0 10px;">-4~4分=觀望</span>
-                <span style="display: inline-block; margin: 0 10px;">-5~-7分=減倉</span>
-                <span style="display: inline-block; margin: 0 10px;">≤-8分=清倉</span>
-            </div>
-        </div>
-        
-        <!-- 免責聲明 -->
-        <div style="margin-top: 20px; padding: 12px; background: #f8f9fa; border-radius: 4px; font-size: 12px; color: #6c757d; text-align: center;">
-            ⚠️ 本分析僅供參考，不構成投資建議。股市有風險，投資需謹慎。
-        </div>
-    </div>
-</div>
-'''
-        
-        # 包裝完整HTML
-        viewport_meta = '<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">'
-        full_html = f'''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    {viewport_meta}
-    <title>{action} - {stock_code} {stock_name}</title>
-    <style>
-        body {{ margin: 0; padding: 0; background: #f5f5f5; }}
-    </style>
-</head>
-<body>
-{html_string}
-{analysis_block}
-</body>
-</html>'''
-        
-        # 儲存檔案
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(full_html)
-        
-        print(f"  ✓ 圖表已生成: {output_path}")
-        
-        # 在終端也輸出分析
-        print(f"  📊 走勢分析:")
-        print(f"     操作建議: {analysis['action']} | 風險等級: {analysis['risk_level']} | 評分: {analysis['score']}")
-        
-        if analysis['signals']:
-            print(f"     信號列表:")
-            for signal in analysis['signals']:
-                print(f"       • {signal}")
+        # 儲存圖表
+        output_path = Path(output_folder) / f"{code}_{name}.html"
+        fig.write_html(str(output_path))
         
         return True
         
     except Exception as e:
-        print(f"  ❌ 生成圖表失敗: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-    """生成單檔股票的HTML圖表"""
-    try:
-        # 讀取資料
-        df = pd.read_csv(csv_file, encoding='utf-8')
-        
-        # 轉換資料類型
-        df['日期'] = pd.to_datetime(df['日期'], errors='coerce')
-        
-        # 移除千位分隔符逗號後再轉換數值
-        for col in ['開盤價', '最高價', '最低價', '收盤價', '成交張數',
-                    '外陸資買賣超張數', '投信買賣超張數', '自營商買賣超張數']:
-            if col in df.columns:
-                df[col] = df[col].astype(str).str.replace(',', '', regex=False)
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        df.dropna(subset=['日期'], inplace=True)
-        df.sort_values('日期', inplace=True)
-        
-        # 取最近60筆資料
-        df_chart = df.tail(60).copy()
-        
-        # 計算移動平均線
-        df_chart['MA5'] = df_chart['收盤價'].rolling(window=5, min_periods=1).mean()
-        df_chart['MA10'] = df_chart['收盤價'].rolling(window=10, min_periods=1).mean()
-        
-        # 創建子圖
-        fig = make_subplots(
-            rows=4, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.03,
-            subplot_titles=('', '', '', ''),
-            row_heights=[0.4, 0.2, 0.2, 0.2],
-            specs=[[{"secondary_y": False}],
-                   [{"secondary_y": False}],
-                   [{"secondary_y": False}],
-                   [{"secondary_y": False}]]
-        )
-        
-        # 第一層：K線圖
-        fig.add_trace(
-            go.Candlestick(
-                x=df_chart['日期'],
-                open=df_chart['開盤價'],
-                high=df_chart['最高價'],
-                low=df_chart['最低價'],
-                close=df_chart['收盤價'],
-                name='K線',
-                increasing_line_color='#FF5252',
-                increasing_fillcolor='#FF5252',
-                decreasing_line_color='#00C851',
-                decreasing_fillcolor='#00C851',
-                line=dict(width=0.8),
-            ),
-            row=1, col=1
-        )
-        
-        # 添加MA5和MA10
-        for ma_name, ma_col, color in [('MA5', 'MA5', 'blue'), ('MA10', 'MA10', 'orange')]:
-            if ma_col in df_chart.columns and df_chart[ma_col].notna().sum() > 0:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_chart['日期'],
-                        y=df_chart[ma_col],
-                        name=ma_name,
-                        line=dict(color=color, width=1.5),
-                        mode='lines',
-                    ),
-                    row=1, col=1
-                )
-        
-        # 第二層：成交量
-        if '成交張數' in df_chart.columns:
-            volume_lots = pd.to_numeric(df_chart['成交張數'], errors='coerce')
-            colors = []
-            for i in range(len(df_chart)):
-                if i == 0:
-                    if df_chart['收盤價'].iloc[i] >= df_chart['開盤價'].iloc[i]:
-                        colors.append('rgba(255, 82, 82, 0.8)')
-                    else:
-                        colors.append('rgba(0, 200, 81, 0.8)')
-                else:
-                    if df_chart['收盤價'].iloc[i] >= df_chart['收盤價'].iloc[i-1]:
-                        colors.append('rgba(255, 82, 82, 0.8)')
-                    else:
-                        colors.append('rgba(0, 200, 81, 0.8)')
-            
-            fig.add_trace(
-                go.Bar(
-                    x=df_chart['日期'],
-                    y=volume_lots,
-                    name='成交量',
-                    marker=dict(color=colors, line=dict(width=0)),
-                    showlegend=True
-                ),
-                row=2, col=1
-            )
-        
-        # 第三層：三大法人當日買賣超
-        has_institutional = False
-        if '外陸資買賣超張數' in df_chart.columns:
-            foreign = pd.to_numeric(df_chart['外陸資買賣超張數'], errors='coerce')
-            trust = pd.to_numeric(df_chart.get('投信買賣超張數', 0), errors='coerce')
-            dealer = pd.to_numeric(df_chart.get('自營商買賣超張數', 0), errors='coerce')
-            
-            if foreign.notna().sum() > 0 or trust.notna().sum() > 0 or dealer.notna().sum() > 0:
-                has_institutional = True
-                for name, data, color in [
-                    ('外資', foreign, 'rgba(255, 82, 82, 0.75)'),
-                    ('投信', trust, 'rgba(0, 200, 81, 0.75)'),
-                    ('自營商', dealer, 'rgba(0, 191, 255, 0.75)')
-                ]:
-                    fig.add_trace(
-                        go.Bar(
-                            x=df_chart['日期'],
-                            y=data,
-                            name=name,
-                            marker_color=color,
-                            legendgroup=name,
-                            showlegend=True
-                        ),
-                        row=3, col=1
-                    )
-        
-        # 第四層：三大法人累積買賣超
-        if has_institutional:
-            foreign_cumsum = pd.to_numeric(df_chart['外陸資買賣超張數'], errors='coerce').fillna(0).cumsum()
-            trust_cumsum = pd.to_numeric(df_chart.get('投信買賣超張數', 0), errors='coerce').fillna(0).cumsum()
-            dealer_cumsum = pd.to_numeric(df_chart.get('自營商買賣超張數', 0), errors='coerce').fillna(0).cumsum()
-            
-            for name, data, color in [
-                ('外資', foreign_cumsum, 'rgb(255, 82, 82)'),
-                ('投信', trust_cumsum, 'rgb(0, 200, 81)'),
-                ('自營商', dealer_cumsum, 'rgb(0, 191, 255)')
-            ]:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df_chart['日期'],
-                        y=data,
-                        name=f'{name}累積',
-                        line=dict(color=color, width=2.5, shape='spline', smoothing=0.8),
-                        mode='lines',
-                        legendgroup=name,
-                        showlegend=True
-                    ),
-                    row=4, col=1
-                )
-        
-        # 計算統計數據
-        latest = df_chart.iloc[-1]
-        latest_date_str = latest['日期'].strftime('%Y-%m-%d')
-        stats = {
-            '成交量': latest['成交張數'] if '成交張數' in latest and pd.notna(latest['成交張數']) else 0,
-            '外資累積': foreign_cumsum.iloc[-1] if has_institutional and len(foreign_cumsum) > 0 else 0,
-            '投信累積': trust_cumsum.iloc[-1] if has_institutional and len(trust_cumsum) > 0 else 0,
-            '自營累積': dealer_cumsum.iloc[-1] if has_institutional and len(dealer_cumsum) > 0 else 0,
-        }
-        
-        # 更新佈局
-        stats_line1 = (
-            f"最新資料日期: {latest_date_str} | "
-            f"外資累積: {stats['外資累積']:,.0f}張 | "
-            f"投信累積: {stats['投信累積']:,.0f}張 | "
-            f"自營累積: {stats['自營累積']:,.0f}張"
-        )
-        stats_line2 = f"股價K線圖 | 成交量: {stats['成交量']:,.0f}張"
-        
-        fig.update_layout(
-            title=dict(
-                text=f'{stock_code} {stock_name} ({stock_type} | {stock_sector}) 技術分析圖表 (最近60筆)<br><sub>{stats_line1}</sub><br><sub>{stats_line2}</sub>',
-                x=0.5,
-                xanchor='center',
-                font=dict(size=16, family='Microsoft JhengHei, Arial, sans-serif')
-            ),
-            xaxis_rangeslider_visible=False,
-            height=1500,
-            showlegend=True,
-            hovermode='x unified',
-            template='plotly_white',
-            barmode='relative',
-            legend=dict(
-                orientation="v",
-                yanchor="top",
-                y=0.98,
-                xanchor="left",
-                x=0.01,
-                bgcolor="rgba(255, 255, 255, 0.8)",
-                bordercolor="lightgray",
-                borderwidth=1,
-                font=dict(family='Microsoft JhengHei, Arial, sans-serif')
-            ),
-            font=dict(family='Microsoft JhengHei, Arial, sans-serif'),
-            dragmode='pan'
-        )
-        
-        # 更新Y軸
-        price_cols = ['開盤價', '最高價', '最低價', '收盤價']
-        price_min = df_chart[price_cols].min().min()
-        price_max = df_chart[price_cols].max().max()
-        price_margin = (price_max - price_min) * 0.05
-        price_range = [price_min - price_margin, price_max + price_margin]
-        
-        fig.update_yaxes(title_text="股價 (元)", row=1, col=1, range=price_range, fixedrange=True)
-        fig.update_yaxes(title_text="成交量 (張)", row=2, col=1, tickformat=",", fixedrange=True)
-        fig.update_yaxes(title_text="當日買賣超 (張)", row=3, col=1, tickformat=",", fixedrange=True)
-        fig.update_yaxes(title_text="累積買賣超 (張)", row=4, col=1, tickformat=",", fixedrange=True)
-        
-        # 更新X軸 - 移除非交易日空隙
-        start_date = df_chart['日期'].min()
-        end_date = df_chart['日期'].max()
-        trading_dates = df_chart['日期'].tolist()
-        
-        # 生成刻度值（每月1、6、11、16、21、26日）
-        tickvals = []
-        current = start_date.replace(day=1)
-        while current <= end_date:
-            for day in [1, 6, 11, 16, 21, 26]:
-                try:
-                    tick_date = current.replace(day=day)
-                    if start_date <= tick_date <= end_date:
-                        tickvals.append(tick_date)
-                except:
-                    pass
-            if current.month == 12:
-                current = current.replace(year=current.year + 1, month=1)
-            else:
-                current = current.replace(month=current.month + 1)
-        
-        for i in range(1, 5):
-            fig.update_xaxes(
-                tickformat="%m-%d",
-                tickangle=-45,
-                tickmode='array',
-                tickvals=tickvals,
-                showticklabels=True,
-                autorange=True,
-                hoverformat="%m-%d",
-                fixedrange=True,
-                rangebreaks=[
-                    dict(values=pd.date_range(start=start_date, end=end_date, freq='D')
-                         .difference(pd.DatetimeIndex(trading_dates)).tolist())
-                ],
-                row=i, col=1
-            )
-        
-        # 執行量價分析
-        analysis = analyze_volume_price_pattern(df)
-        
-        # 生成HTML
-        html_string = fig.to_html(include_plotlyjs='cdn')
-        
-        # 生成分析區塊的HTML
-        # 根據操作建議選擇顏色
-        action_colors = {
-            '重倉': '#FF4444',
-            '上車': '#00C851',
-            '觀望': '#FFA500',
-            '減倉': '#FF8800',
-            '清倉': '#CC0000'
-        }
-        action_color = action_colors.get(analysis['action'], '#666666')
-        
-        # 根據風險等級選擇顏色
-        risk_colors = {
-            '低': '#00C851',
-            '中': '#FFA500',
-            '高': '#FF4444'
-        }
-        risk_color = risk_colors.get(analysis['risk_level'], '#666666')
-        
-        # 生成信號列表HTML
-        signals_html = ""
-        if analysis['signals']:
-            signals_html = "<ul style='margin: 10px 0; padding-left: 25px; line-height: 1.8;'>"
-            for signal in analysis['signals']:
-                signals_html += f"<li style='margin: 5px 0;'>{signal}</li>"
-            signals_html += "</ul>"
-        else:
-            signals_html = "<p style='color: #999; font-style: italic;'>暫無明確信號</p>"
-        
-        # 評分進度條
-        score = analysis['score']
-        # 將評分映射到 0-100 的進度條（-10到10映射到0-100）
-        progress = min(100, max(0, (score + 10) * 5))
-        
-        # 根據評分選擇進度條顏色
-        if score >= 5:
-            progress_color = '#00C851'  # 綠色
-        elif score >= 0:
-            progress_color = '#FFA500'  # 橙色
-        elif score >= -5:
-            progress_color = '#FF8800'  # 深橙
-        else:
-            progress_color = '#FF4444'  # 紅色
-        
-        analysis_block = f'''
-<div style="max-width: 1200px; margin: 30px auto; padding: 20px; font-family: 'Microsoft JhengHei', Arial, sans-serif;">
-    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px 10px 0 0; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-        <h2 style="margin: 0; font-size: 24px; display: flex; align-items: center;">
-            <span style="font-size: 30px; margin-right: 10px;">📊</span>
-            量價戰法分析
-        </h2>
-        <p style="margin: 5px 0 0 0; font-size: 14px; opacity: 0.9;">基於量價關係、K線型態、趨勢判斷的綜合分析</p>
-    </div>
-    
-    <div style="background: white; padding: 25px; border: 1px solid #e0e0e0; border-top: none; border-radius: 0 0 10px 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-        <!-- 核心指標卡片 -->
-        <div style="display: flex; gap: 15px; margin-bottom: 25px; flex-wrap: wrap;">
-            <!-- 操作建議卡 -->
-            <div style="flex: 1; min-width: 200px; background: linear-gradient(135deg, {action_color}15, {action_color}25); border-left: 4px solid {action_color}; padding: 15px; border-radius: 8px;">
-                <div style="font-size: 12px; color: #666; margin-bottom: 5px;">💡 操作建議</div>
-                <div style="font-size: 28px; font-weight: bold; color: {action_color};">{analysis['action']}</div>
-            </div>
-            
-            <!-- 風險等級卡 -->
-            <div style="flex: 1; min-width: 200px; background: linear-gradient(135deg, {risk_color}15, {risk_color}25); border-left: 4px solid {risk_color}; padding: 15px; border-radius: 8px;">
-                <div style="font-size: 12px; color: #666; margin-bottom: 5px;">⚠️ 風險等級</div>
-                <div style="font-size: 28px; font-weight: bold; color: {risk_color};">{analysis['risk_level']}</div>
-            </div>
-            
-            <!-- 評分卡 -->
-            <div style="flex: 1; min-width: 200px; background: linear-gradient(135deg, {progress_color}15, {progress_color}25); border-left: 4px solid {progress_color}; padding: 15px; border-radius: 8px;">
-                <div style="font-size: 12px; color: #666; margin-bottom: 5px;">📈 綜合評分</div>
-                <div style="font-size: 28px; font-weight: bold; color: {progress_color};">{score} 分</div>
-                <div style="background: #e0e0e0; height: 8px; border-radius: 4px; margin-top: 8px; overflow: hidden;">
-                    <div style="background: {progress_color}; height: 100%; width: {progress}%; transition: width 0.3s ease;"></div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- 信號列表 -->
-        <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; border: 1px solid #e9ecef;">
-            <h3 style="margin: 0 0 15px 0; font-size: 18px; color: #333; display: flex; align-items: center;">
-                <span style="font-size: 22px; margin-right: 8px;">🔍</span>
-                技術信號分析
-            </h3>
-            {signals_html}
-        </div>
-        
-        <!-- 評分說明 -->
-        <div style="margin-top: 20px; padding: 15px; background: #fff3cd; border-left: 4px solid #ffc107; border-radius: 4px;">
-            <div style="font-size: 14px; color: #856404; line-height: 1.6;">
-                <strong>📖 評分標準：</strong>
-                <span style="display: inline-block; margin: 0 10px;">≥8分=重倉</span>
-                <span style="display: inline-block; margin: 0 10px;">5-7分=上車</span>
-                <span style="display: inline-block; margin: 0 10px;">-4~4分=觀望</span>
-                <span style="display: inline-block; margin: 0 10px;">-5~-7分=減倉</span>
-                <span style="display: inline-block; margin: 0 10px;">≤-8分=清倉</span>
-            </div>
-        </div>
-        
-        <!-- 免責聲明 -->
-        <div style="margin-top: 20px; padding: 12px; background: #f8f9fa; border-radius: 4px; font-size: 12px; color: #6c757d; text-align: center;">
-            ⚠️ 本分析僅供參考，不構成投資建議。股市有風險，投資需謹慎。
-        </div>
-    </div>
-</div>
-'''
-        
-        # 包裝完整HTML
-        viewport_meta = '<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">'
-        full_html = f'''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    {viewport_meta}
-    <title>{stock_code} {stock_name}</title>
-    <style>
-        body {{ margin: 0; padding: 0; background: #f5f5f5; }}
-    </style>
-</head>
-<body>
-{html_string}
-{analysis_block}
-</body>
-</html>'''
-        
-        # 儲存檔案
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(full_html)
-        
-        print(f"  ✓ 圖表已生成: {output_path}")
-        
-        # 在終端也輸出分析
-        print(f"  📊 走勢分析:")
-        print(f"     操作建議: {analysis['action']} | 風險等級: {analysis['risk_level']} | 評分: {analysis['score']}")
-        
-        if analysis['signals']:
-            print(f"     信號列表:")
-            for signal in analysis['signals']:
-                print(f"       • {signal}")
-        
-        return True
-        
-    except Exception as e:
-        print(f"  ❌ 生成圖表失敗: {e}")
+        print(f"        ❌ 生成圖表失敗: {e}")
         import traceback
         traceback.print_exc()
         return False
 
 # ==============================
-# 🚀 主程式
+# 🚀 主函數
 # ==============================
 def main():
-    folder = Path(FOLDER_PATH)
-    if not folder.exists():
-        print(f"❌ 資料夾 '{FOLDER_PATH}' 不存在！")
+    """主程式進入點"""
+    print("=" * 70)
+    print("🔍 台股趨勢掃描器 - 從資料庫讀取版本")
+    print("=" * 70)
+    
+    # 檢查資料庫檔案是否存在
+    if not Path(DB_TSE_PATH).exists() and not Path(DB_OTC_PATH).exists():
+        print(f"❌ 找不到資料庫檔案：{DB_TSE_PATH} 或 {DB_OTC_PATH}")
         return
-
+    
+    # 載入公司資訊
+    print("📂 載入公司資訊...")
+    load_company_info()
+    print(f"   ✓ 已載入 {len(company_info)} 家公司資訊\n")
+    
     # 建立輸出資料夾
     base_output_folder = Path(OUTPUT_CHARTS_FOLDER)
     base_output_folder.mkdir(exist_ok=True)
-    
-    # 加載公司資訊
-    company_info = load_company_lists()
     
     # ==========================================
     # 概念股模式
     # ==========================================
     if IS_CONCEPT_STOCK:
-        print(f"🎯 概念股模式啟動")
-        print(f"   • 收盤價門檻: ≤ {MAX_PRICE_CONCEPT_THRESHOLD} 元（高於此價格會被過濾）")
+        print("📊 模式：概念股掃描")
+        print(f"   • 資料庫: {DB_TSE_PATH}, {DB_OTC_PATH}")
+        
+        enabled = []
+        if FLAG_VOLUME_SPIKE:
+            enabled.append(f"爆量(回看{VOL_CONCEPT_LOOKBACK}天, {VOL_CONCEPT_MULTIPLE}x)")
+        if FLAG_RED_THREE:
+            enabled.append("紅三兵")
+        if FLAG_NET_BUY:
+            enabled.append("法人買超")
+        
+        print(f"   • 啟用條件: {' + '.join(enabled) if enabled else '無'}")
+        print(f"   • 收盤價門檻: ≤ {MAX_PRICE_CONCEPT_THRESHOLD} 元")
+        
         if FLAG_VOLUME_SPIKE:
             print(f"   • 爆量條件: 回看{VOL_CONCEPT_LOOKBACK}天, 倍數{VOL_CONCEPT_MULTIPLE}x, 最低門檻{MIN_VOLUME_CONCEPT_THRESHOLD:,}張")
         
-        # 從第一個CSV檔案讀取最新日期，用於建立日期資料夾
-        csv_files = list(folder.glob("*.csv"))
-        if not csv_files:
-            print(f"📁 資料夾 '{FOLDER_PATH}' 中沒有 .csv 檔案！")
-            return
-            
-        latest_date_str = None
-        try:
-            # 隨便讀取一個CSV來取得日期
-            sample_df = pd.read_csv(csv_files[0], encoding='utf-8', usecols=['日期'])
-            sample_df['日期'] = pd.to_datetime(sample_df['日期'], errors='coerce')
-            sample_df.dropna(subset=['日期'], inplace=True)
-            if len(sample_df) > 0:
-                latest_date = sample_df['日期'].max()
-                latest_date_str = latest_date.strftime('%Y.%m.%d')
-                print(f"📅 最新資料日期: {latest_date_str}")
-        except Exception as e:
-            print(f"⚠️ 無法讀取日期，使用當前日期: {e}")
-            from datetime import datetime
-            latest_date_str = datetime.now().strftime('%Y.%m.%d')
+        # 獲取最新日期
+        latest_date_str = get_latest_date_from_db()
+        print(f"📅 最新資料日期: {latest_date_str}")
         
         # 建立以日期_All命名的子資料夾
         output_folder = base_output_folder / f"{latest_date_str}_All"
@@ -1416,26 +776,19 @@ def main():
                 code = str(row['股票代碼'])
                 name = row['股票名稱']
                 
-                # 檢查股票數據檔案是否存在
-                csv_file_path = folder / f"{code}.csv"
-                if not csv_file_path.exists():
-                    print(f"⚠️  [{idx+1}/{len(concept_df)}] {industry} | {code} {name} - 數據檔案不存在")
+                # 從資料庫讀取股票資料
+                df = read_stock_from_db(code)
+                if df is None or len(df) == 0:
+                    print(f"⚠️  [{idx+1}/{len(concept_df)}] {industry} | {code} {name} - 資料庫中無資料")
                     continue
                 
                 # 檢查最新收盤價是否符合門檻
                 try:
-                    temp_df = pd.read_csv(csv_file_path, encoding='utf-8', usecols=['日期', '收盤價'])
-                    temp_df['日期'] = pd.to_datetime(temp_df['日期'], errors='coerce')
-                    temp_df['收盤價'] = temp_df['收盤價'].astype(str).str.replace(',', '', regex=False)
-                    temp_df['收盤價'] = pd.to_numeric(temp_df['收盤價'], errors='coerce')
-                    temp_df.dropna(subset=['日期', '收盤價'], inplace=True)
-                    temp_df.sort_values('日期', inplace=True)
+                    latest_close = df['收盤價'].iloc[-1]
                     
-                    if len(temp_df) == 0:
-                        print(f"⚠️  [{idx+1}/{len(concept_df)}] {industry} | {code} {name} - 無有效數據")
+                    if pd.isna(latest_close):
+                        print(f"⚠️  [{idx+1}/{len(concept_df)}] {industry} | {code} {name} - 無有效收盤價")
                         continue
-                    
-                    latest_close = temp_df['收盤價'].iloc[-1]
                     
                     if latest_close > MAX_PRICE_CONCEPT_THRESHOLD:
                         print(f"⏭️  [{idx+1}/{len(concept_df)}] {industry} | {code} {name} - 收盤價 {latest_close:.2f} 高於門檻 {MAX_PRICE_CONCEPT_THRESHOLD}")
@@ -1447,7 +800,7 @@ def main():
                 # 如果啟用爆量過濾，則檢查是否符合條件
                 if FLAG_VOLUME_SPIKE:
                     stock_result = analyze_stock(
-                        csv_file_path,
+                        df,
                         vol_lookback=VOL_CONCEPT_LOOKBACK,
                         vol_multiple=VOL_CONCEPT_MULTIPLE,
                         min_volume_threshold=MIN_VOLUME_CONCEPT_THRESHOLD
@@ -1468,7 +821,7 @@ def main():
                 type_str = company_info.get(code, {}).get('type', '未知')
                 sector = company_info.get(code, {}).get('sector', '未知')
                 
-                if generate_stock_chart(code, name, csv_file_path, output_folder, type_str, sector, industry_category=industry):
+                if generate_stock_chart(code, name, df, output_folder, type_str, sector, industry_category=industry):
                     chart_count += 1
                 
                 print()
@@ -1493,26 +846,18 @@ def main():
     # ==========================================
     # 一般模式（原有邏輯）
     # ==========================================
-    csv_files = list(folder.glob("*.csv"))
-    if not csv_files:
-        print(f"📁 資料夾 '{FOLDER_PATH}' 中沒有 .csv 檔案！")
+    print("📊 模式：一般掃描")
+    print(f"   • 資料庫: {DB_TSE_PATH}, {DB_OTC_PATH}")
+    
+    # 獲取所有股票代碼
+    stock_codes = get_all_stock_codes()
+    if not stock_codes:
+        print(f"❌ 資料庫中沒有股票資料！")
         return
     
-    # 從第一個CSV檔案讀取最新日期，用於建立日期資料夾
-    latest_date_str = None
-    try:
-        # 隨便讀取一個CSV來取得日期
-        sample_df = pd.read_csv(csv_files[0], encoding='utf-8', usecols=['日期'])
-        sample_df['日期'] = pd.to_datetime(sample_df['日期'], errors='coerce')
-        sample_df.dropna(subset=['日期'], inplace=True)
-        if len(sample_df) > 0:
-            latest_date = sample_df['日期'].max()
-            latest_date_str = latest_date.strftime('%Y.%m.%d')
-            print(f"📅 最新資料日期: {latest_date_str}")
-    except Exception as e:
-        print(f"⚠️ 無法讀取日期，使用當前日期: {e}")
-        from datetime import datetime
-        latest_date_str = datetime.now().strftime('%Y.%m.%d')
+    # 獲取最新日期
+    latest_date_str = get_latest_date_from_db()
+    print(f"📅 最新資料日期: {latest_date_str}")
     
     # 建立以日期命名的子資料夾
     output_folder = base_output_folder / latest_date_str
@@ -1524,13 +869,13 @@ def main():
     if FLAG_RED_THREE: enabled.append("紅三兵")
     if FLAG_NET_BUY: enabled.append("三大法人≥2天淨買超")
     
-    print(f"🔍 掃描 {len(csv_files)} 檔股票...")
+    print(f"🔍 掃描 {len(stock_codes)} 檔股票...")
     print(f"   • 啟用條件: {' + '.join(enabled) if enabled else '無'}\n")
 
     # 篩選符合條件的股票
     results = []
-    for csv_file in csv_files:
-        res = analyze_stock(csv_file)
+    for stock_code in stock_codes:
+        res = analyze_stock(stock_code)
         if res:
             results.append(res)
 
@@ -1564,10 +909,10 @@ def main():
                 print(f"        ▸ 合計 >0 天數：{summary['positive_days']}/3")
             
             # 生成圖表
-            csv_file_path = folder / f"{code}.csv"
+            df = read_stock_from_db(code)
             
             print(f"    🎨 生成圖表...")
-            if generate_stock_chart(code, name, csv_file_path, output_folder, type_str, sector):
+            if generate_stock_chart(code, name, df, output_folder, type_str, sector):
                 chart_count += 1
             
             print()
