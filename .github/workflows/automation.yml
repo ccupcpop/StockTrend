@@ -25,7 +25,7 @@ jobs:
         pip install pandas requests beautifulsoup4 lxml
         
     - name: Run StockTrend2.py
-      run: python StockTrend/StockTrend2.py
+      run: python StockTrend2.py
         
     - name: Copy stock_hot.db to StockTracker
       run: |
@@ -33,7 +33,7 @@ jobs:
         mkdir -p StockTracker/StockInfo
         
         # 複製資料庫檔案
-        cp StockTrend/stock_data/stock_hot.db StockTracker/StockInfo/
+        cp stock_data/stock_hot.db StockTracker/StockInfo/
         
         echo "Database file copied successfully"
         
