@@ -1,71 +1,73 @@
 name: Auto Copy Stock Database
 
-# 每天台灣時間下午五點執行 (UTC 09:00)
 on:
   schedule:
-    - cron: '0 9 * * *'  # 台灣時間 17:00 = UTC 09:00
-  workflow_dispatch:  # 保留手動觸發選項
-
-permissions:
-  contents: write  # 給予寫入權限
+    - cron: '0 9 * * *'  # 台灣時間 17:00
+  workflow_dispatch:      # 保留手動觸發按鈕
 
 jobs:
   copy-database:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      # 1. 檢出當前專案 (含有 StockTrend2.py 的專案)
+      - name: Checkout current repository
+        uses: actions/checkout@v4
       
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.x'
+      # 2. 設定 Python 環境
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
         
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install pandas numpy plotly requests beautifulsoup4 lxml
+      # 3. 安裝必要套件
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy plotly requests beautifulsoup4 lxml
         
-    - name: Run StockTrend2.py
-      run: python StockTrend2.py
+      # 4. 執行爬蟲腳本產生資料庫
+      - name: Run StockTrend2.py
+        run: python StockTrend2.py
         
-    - name: Copy stock_hot.db to StockTracker
-      run: |
-        # 複製檔案到臨時位置
-        mkdir -p /tmp/stock_db
-        cp stock_data/stock_hot.db /tmp/stock_db/
+      # 5. 將產生的資料庫移至臨時目錄避免被 checkout 覆蓋
+      - name: Copy stock_hot.db to temp
+        run: |
+          mkdir -p /tmp/stock_db
+          cp stock_data/stock_hot.db /tmp/stock_db/
         
-    - name: Checkout StockTracker repository
-      uses: actions/checkout@v4
-      with:
-        repository: ccupcpop/StockTracker
-        path: StockTracker
-        token: ${{ secrets.MY_PAT }}
+      # 6. 檢出目標專案 (StockTracker)
+      # 注意：這裡必須確保你在 Secrets 中有設定 MY_PAT
+      - name: Checkout StockTracker repository
+        uses: actions/checkout@v4
+        with:
+          repository: ccupcpop/StockTracker
+          path: StockTracker
+          token: ${{ secrets.MY_PAT }}
+          persist-credentials: true
         
-    - name: Copy and push to StockTracker
-      run: |
-        # 確保目標目錄存在
-        mkdir -p StockTracker/StockInfo
-        
-        # 複製資料庫檔案
-        cp /tmp/stock_db/stock_hot.db StockTracker/StockInfo/
-        
-        # 進入 StockTracker 目錄
-        cd StockTracker
-        
-        # 設定 Git
-        git config --local user.email "github-actions[bot]@users.noreply.github.com"
-        git config --local user.name "github-actions[bot]"
-        
-        # 檢查是否有變更
-        git add StockInfo/stock_hot.db
-        
-        if git diff --staged --quiet; then
-          echo "No changes to commit"
-        else
-          git commit -m "Auto update stock_hot.db - $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M:%S')"
-          git push
-        fi
-        
-        echo "Database file updated successfully"
+      # 7. 更新檔案並推送到 StockTracker
+      - name: Copy and push to StockTracker
+        run: |
+          # 確保目標路徑存在
+          mkdir -p StockTracker/StockInfo
+          
+          # 覆蓋檔案
+          cp /tmp/stock_db/stock_hot.db StockTracker/StockInfo/
+          
+          cd StockTracker
+          
+          # 設定 Git 使用者資訊
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          
+          # 提交並推送
+          git add StockInfo/stock_hot.db
+          
+          # 只有在檔案有變動時才提交，避免噴錯
+          if git diff --staged --quiet; then
+            echo "No changes detected in database."
+          else
+            git commit -m "Auto update stock_hot.db - $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M:%S')"
+            git push origin main
+          fi
