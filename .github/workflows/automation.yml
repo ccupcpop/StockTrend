@@ -22,7 +22,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pandas requests beautifulsoup4 lxml
+        pip install pandas numpy plotly requests beautifulsoup4 lxml
         
     - name: Run StockTrend2.py
       run: python StockTrend2.py
