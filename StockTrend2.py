@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
 import sqlite3
+import json
 
 # ==============================
 # 🔧 【可控制的參數設定】
@@ -1445,6 +1446,8 @@ def save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True):
                 操作建議 TEXT,
                 風險等級 TEXT,
                 評分 INTEGER,
+                走勢分析 TEXT,
+                信號列表 TEXT,
                 更新時間 TEXT,
                 PRIMARY KEY (股票代碼, 日期)
             )
@@ -1467,15 +1470,17 @@ def save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True):
                 action = analysis['action']
                 risk_level = analysis['risk_level']
                 score = analysis.get('score', 0)
+                summary = analysis.get('summary', '')
+                signals = json.dumps(analysis.get('signals', []), ensure_ascii=False)
                 
                 cursor.execute('''
                     INSERT OR REPLACE INTO hot_stocks 
-                    (股票代碼, 股票名稱, 類型, 產業分類, 日期, 收盤價, 成交量, 操作建議, 風險等級, 評分, 更新時間)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (股票代碼, 股票名稱, 類型, 產業分類, 日期, 收盤價, 成交量, 操作建議, 風險等級, 評分, 走勢分析, 信號列表, 更新時間)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     code, name, type_str, sector, latest_date_str, 
                     r['latest_close'], r.get('last_volume', 0),
-                    action, risk_level, score, update_time
+                    action, risk_level, score, summary, signals, update_time
                 ))
         
         conn.commit()
