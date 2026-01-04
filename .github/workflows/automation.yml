@@ -6,6 +6,9 @@ on:
     - cron: '0 9 * * *'  # 台灣時間 17:00 = UTC 09:00
   workflow_dispatch:  # 保留手動觸發選項
 
+permissions:
+  contents: write  # 給予寫入權限
+
 jobs:
   copy-database:
     runs-on: ubuntu-latest
