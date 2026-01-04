@@ -10,12 +10,10 @@ import sqlite3
 # 🔧 【可控制的參數設定】
 # ==============================
 # 條件開關
-FLAG_VOLUME_SPIKE = False   # 爆量
+FLAG_VOLUME_SPIKE = True   # 爆量
 FLAG_RED_THREE = True      # 紅三兵
 FLAG_NET_BUY = True        # 三大法人：3天中至少2天淨買超 > 0
 
-# 模式選擇
-IS_FOCUS = True  # 是否使用追蹤清單模式（分析 focus_stocks.csv 中的股票）
 
 # 資料夾路徑
 FOLDER_PATH = "stock_data"
@@ -366,11 +364,11 @@ def load_company_lists():
     tse_company_path = Path("tse_company_list.csv")
     if tse_company_path.exists():
         try:
-            tse_company_df = pd.read_csv(tse_company_path, header=None, dtype=str)
+            tse_company_df = pd.read_csv(tse_company_path, dtype=str)
             for _, row in tse_company_df.iterrows():
-                code = str(row[0]).strip()
-                if len(code) == 4 and code.isdigit():
-                    name = str(row[1]).strip() if len(row) > 1 else '未知'
+                code = str(row['代號']).strip() if '代號' in row else str(row.iloc[0]).strip()
+                if code and (code.isdigit() or (code.endswith('B') and code[:-1].isdigit())):  # 支援一般股票和ETF
+                    name = str(row['名稱']).strip() if '名稱' in row else (str(row.iloc[1]).strip() if len(row) > 1 else '未知')
                     company_info[code] = {
                         'name': name,
                         'type': '上市',
@@ -386,7 +384,7 @@ def load_company_lists():
             tse_df = pd.read_csv(tse_concept_path, header=None, dtype=str)
             for _, row in tse_df.iterrows():
                 code = str(row[0]).strip()
-                if len(code) == 4 and code.isdigit():
+                if code and (code.isdigit() or (code.endswith('B') and code[:-1].isdigit())):  # 支援一般股票和ETF
                     name = str(row[1]).strip() if len(row) > 1 else '未知'
                     sector = str(row[2]).strip() if len(row) > 2 else '未知'
                     
@@ -407,11 +405,11 @@ def load_company_lists():
     otc_company_path = Path("otc_company_list.csv")
     if otc_company_path.exists():
         try:
-            otc_company_df = pd.read_csv(otc_company_path, header=None, dtype=str)
+            otc_company_df = pd.read_csv(otc_company_path, dtype=str)
             for _, row in otc_company_df.iterrows():
-                code = str(row[0]).strip()
-                if len(code) == 4 and code.isdigit():
-                    name = str(row[1]).strip() if len(row) > 1 else '未知'
+                code = str(row['代號']).strip() if '代號' in row else str(row.iloc[0]).strip()
+                if code and (code.isdigit() or (code.endswith('B') and code[:-1].isdigit())):  # 支援一般股票和ETF
+                    name = str(row['名稱']).strip() if '名稱' in row else (str(row.iloc[1]).strip() if len(row) > 1 else '未知')
                     company_info[code] = {
                         'name': name,
                         'type': '上櫃',
@@ -427,7 +425,7 @@ def load_company_lists():
             otc_df = pd.read_csv(otc_concept_path, header=None, dtype=str)
             for _, row in otc_df.iterrows():
                 code = str(row[0]).strip()
-                if len(code) == 4 and code.isdigit():
+                if code and (code.isdigit() or (code.endswith('B') and code[:-1].isdigit())):  # 支援一般股票和ETF
                     name = str(row[1]).strip() if len(row) > 1 else '未知'
                     sector = str(row[2]).strip() if len(row) > 2 else '未知'
                     
@@ -1414,7 +1412,91 @@ def generate_stock_chart(stock_code, stock_name, csv_file, output_folder, stock_
         return False
 
 # ==============================
-# 🚀 主程式
+# 💾 保存到 stock_hot.db
+# ==============================
+def save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True):
+    """將符合條件的股票保存到 stock_hot.db
+    
+    參數:
+        is_first_stage: True=第一階段（會刪除舊資料庫），False=第二階段（追加資料）
+    """
+    try:
+        db_path = "stock_data/stock_hot.db"
+        
+        # 第一階段：刪除舊資料庫，創建全新資料庫
+        if is_first_stage:
+            if Path(db_path).exists():
+                Path(db_path).unlink()
+                print(f"🗑️  已刪除舊資料庫")
+        
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # 創建表格（只在第一階段或表格不存在時創建）
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS hot_stocks (
+                股票代碼 TEXT,
+                股票名稱 TEXT,
+                類型 TEXT,
+                產業分類 TEXT,
+                日期 TEXT,
+                收盤價 REAL,
+                成交量 INTEGER,
+                操作建議 TEXT,
+                風險等級 TEXT,
+                評分 INTEGER,
+                更新時間 TEXT,
+                PRIMARY KEY (股票代碼, 日期)
+            )
+        ''')
+        
+        from datetime import datetime
+        update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        for r in results:
+            code = r['code']
+            info = company_info.get(code, {})
+            name = info.get('name', '未知')
+            type_str = info.get('type', '未知')
+            sector = info.get('sector', '未知')
+            
+            # 執行量價分析
+            stock_df = read_stock_from_db(code)
+            if stock_df is not None and len(stock_df) >= 10:
+                analysis = analyze_volume_price_pattern(stock_df)
+                action = analysis['action']
+                risk_level = analysis['risk_level']
+                score = analysis.get('score', 0)
+                
+                cursor.execute('''
+                    INSERT OR REPLACE INTO hot_stocks 
+                    (股票代碼, 股票名稱, 類型, 產業分類, 日期, 收盤價, 成交量, 操作建議, 風險等級, 評分, 更新時間)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    code, name, type_str, sector, latest_date_str, 
+                    r['latest_close'], r.get('last_volume', 0),
+                    action, risk_level, score, update_time
+                ))
+        
+        conn.commit()
+        conn.close()
+        
+        if is_first_stage:
+            print(f"\n✅ 第一階段：已保存 {len(results)} 檔股票到 {db_path}")
+            print(f"   資料庫狀態：全新創建，只包含 hot_stocks 表\n")
+        else:
+            print(f"\n✅ 第二階段：已追加 {len(results)} 檔股票到 {db_path}\n")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ 保存到資料庫失敗: {e}\n")
+        import traceback
+        traceback.print_exc()
+        return False
+
+# ==============================
+# 🎯 主程式 - 兩階段執行
 # ==============================
 def main():
     # 檢查資料庫檔案是否存在
@@ -1428,119 +1510,6 @@ def main():
     
     # 加載公司資訊
     company_info = load_company_lists()
-    
-    # ==========================================
-    # 追蹤清單模式
-    # ==========================================
-    if IS_FOCUS:
-        print(f"🎯 追蹤清單模式啟動")
-        
-        # 從資料庫讀取最新日期
-        latest_date_str = None
-        try:
-            if Path(DB_TSE_PATH).exists():
-                conn = sqlite3.connect(DB_TSE_PATH)
-                cursor = conn.cursor()
-                cursor.execute("SELECT MAX(日期) FROM stock_data")
-                result = cursor.fetchone()
-                if result and result[0]:
-                    latest_date = pd.to_datetime(result[0])
-                    latest_date_str = latest_date.strftime('%Y.%m.%d')
-                conn.close()
-            
-            if latest_date_str:
-                print(f"📅 最新資料日期: {latest_date_str}")
-            else:
-                from datetime import datetime
-                latest_date_str = datetime.now().strftime('%Y.%m.%d')
-        except Exception as e:
-            print(f"⚠️ 無法讀取日期，使用當前日期: {e}")
-            from datetime import datetime
-            latest_date_str = datetime.now().strftime('%Y.%m.%d')
-        
-        # 建立以日期_focus命名的子資料夾
-        output_folder = base_output_folder / f"{latest_date_str}_focus"
-        output_folder.mkdir(exist_ok=True)
-        print(f"📁 輸出資料夾: {output_folder}\n")
-        
-        # 讀取追蹤清單
-        focus_csv_path = Path(FOCUS_STOCKS_CSV)
-        if not focus_csv_path.exists():
-            print(f"❌ 追蹤清單檔案 '{FOCUS_STOCKS_CSV}' 不存在！")
-            return
-        
-        try:
-            focus_df = pd.read_csv(focus_csv_path, encoding='utf-8')
-            
-            # 過濾重複的股票代碼（保留第一次出現）
-            original_count = len(focus_df)
-            focus_df = focus_df.drop_duplicates(subset=['股票代碼'], keep='first')
-            deduplicated_count = len(focus_df)
-            
-            if original_count > deduplicated_count:
-                print(f"📋 讀取到 {original_count} 筆資料，去重後剩餘 {deduplicated_count} 檔股票")
-                print(f"   （已過濾 {original_count - deduplicated_count} 個重複項目）\n")
-            else:
-                print(f"📋 讀取到 {deduplicated_count} 檔追蹤股票\n")
-            
-            chart_count = 0
-            for idx, row in focus_df.iterrows():
-                industry = row['產業分類']
-                code = str(row['股票代碼'])
-                name = row['股票名稱']
-                category = row['領域分類'] if '領域分類' in row else ''
-                
-                print(f"📊 [{idx+1}/{len(focus_df)}] {industry} | {code} {name}")
-                
-                # 從資料庫讀取資料
-                stock_df = read_stock_from_db(code)
-                if stock_df is None or len(stock_df) == 0:
-                    print(f"    ⚠️ 資料庫中無資料\n")
-                    continue
-                
-                # 執行量價分析
-                if len(stock_df) >= 10:
-                    analysis = analyze_volume_price_pattern(stock_df)
-                    action = analysis['action']
-                    risk_level = analysis['risk_level']
-                    score = analysis.get('score', 0)
-                    
-                    print(f"    📊 量價分析: {action} | 風險: {risk_level} | 評分: {score}")
-                    print(f"    💡 {analysis['summary']}")
-                    
-                    # 生成圖表（不限定只有「上車」）
-                    type_str = company_info.get(code, {}).get('type', '未知')
-                    sector = company_info.get(code, {}).get('sector', '未知')
-                    
-                    print(f"    🎨 生成圖表...")
-                    if generate_stock_chart(code, name, None, output_folder, type_str, sector, industry_category=industry):
-                        chart_count += 1
-                else:
-                    print(f"    ⚠️ 資料不足，無法分析")
-                
-                print()
-            
-            print("=" * 70)
-            print(f"✅ 追蹤清單掃描完成：")
-            print(f"   • 總追蹤股票數: {len(focus_df)}")
-            print(f"   • 成功生成圖表: {chart_count}")
-            print(f"   • 輸出資料夾: {output_folder}")
-            
-        except Exception as e:
-            print(f"❌ 讀取追蹤清單失敗: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        return
-    
-    # ==========================================
-    # 一般模式（掃描所有股票）
-    # ==========================================
-    # 從資料庫獲取所有股票代碼
-    stock_codes = get_all_stock_codes()
-    if not stock_codes:
-        print(f"📁 資料庫中沒有股票資料！")
-        return
     
     # 從資料庫讀取最新日期
     latest_date_str = None
@@ -1568,6 +1537,19 @@ def main():
     # 建立以日期命名的子資料夾
     output_folder = base_output_folder / latest_date_str
     output_folder.mkdir(exist_ok=True)
+    
+    # ==========================================
+    # 第一階段：一般模式（掃描所有股票）
+    # ==========================================
+    print("=" * 70)
+    print("🔍 第一階段：一般模式")
+    print("=" * 70)
+    
+    stock_codes = get_all_stock_codes()
+    if not stock_codes:
+        print(f"📁 資料庫中沒有股票資料！")
+        return
+    
     print(f"📁 輸出資料夾: {output_folder}\n")
 
     enabled = []
@@ -1590,12 +1572,15 @@ def main():
         results.sort(key=lambda x: x.get('last_volume', 0), reverse=True)
 
     print("=" * 70)
+    all_codes_stage1 = set()  # 用於記錄第一階段處理的股票代碼
+    
     if results:
         print(f"✅ 找到 {len(results)} 檔符合基本條件，將進一步篩選「上車」建議：\n")
         
         chart_count = 0
         for r in results:
             code = r['code']
+            all_codes_stage1.add(code)
             info = company_info.get(code, {})
             name = info.get('name', '未知')
             type_str = info.get('type', '未知')
@@ -1622,7 +1607,7 @@ def main():
                 action = analysis['action']
                 print(f"    📊 量價分析: {action}")
                 
-                if action == '上車':
+                if action in ['上車', '重倉', '觀望']:
                     print(f"    🎨 生成圖表...")
                     if generate_stock_chart(code, name, None, output_folder, type_str, sector):
                         chart_count += 1
@@ -1633,10 +1618,126 @@ def main():
             
             print()
         
+        # 保存到資料庫（第一階段，創建全新資料庫）
+        save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True)
+        
         print("=" * 70)
-        print(f"✅ 成功生成 {chart_count} 個「上車」建議的圖表到 {OUTPUT_CHARTS_FOLDER} 資料夾")
+        print(f"✅ 第一階段完成：成功生成 {chart_count} 個「上車」建議的圖表")
     else:
         print("❌ 未找到符合所有啟用條件的股票")
+    
+    # ==========================================
+    # 第二階段：追蹤清單模式
+    # ==========================================
+    print("\n" + "=" * 70)
+    print("🎯 第二階段：追蹤清單模式")
+    print("=" * 70)
+    
+    # 讀取追蹤清單
+    focus_csv_path = Path(FOCUS_STOCKS_CSV)
+    if not focus_csv_path.exists():
+        print(f"⚠️ 追蹤清單檔案 '{FOCUS_STOCKS_CSV}' 不存在，跳過第二階段\n")
+        print(f"✅ 所有處理完成！輸出資料夾: {output_folder}")
+        return
+    
+    try:
+        focus_df = pd.read_csv(focus_csv_path, encoding='utf-8')
+        
+        # 過濾重複的股票代碼（保留第一次出現）
+        original_count = len(focus_df)
+        focus_df = focus_df.drop_duplicates(subset=['股票代碼'], keep='first')
+        deduplicated_count = len(focus_df)
+        
+        if original_count > deduplicated_count:
+            print(f"📋 讀取到 {original_count} 筆資料，去重後剩餘 {deduplicated_count} 檔股票")
+            print(f"   （已過濾 {original_count - deduplicated_count} 個重複項目）\n")
+        else:
+            print(f"📋 讀取到 {deduplicated_count} 檔追蹤股票\n")
+        
+        chart_count = 0
+        skipped_count = 0
+        results_stage2 = []  # 收集第二階段的結果
+        
+        for idx, row in focus_df.iterrows():
+            industry = row['產業分類']
+            code = str(row['股票代碼'])
+            name = row['股票名稱']
+            category = row['領域分類'] if '領域分類' in row else ''
+            
+            # 過濾重複：如果這支股票在第一階段已處理，跳過
+            if code in all_codes_stage1:
+                print(f"⏭️  [{idx+1}/{len(focus_df)}] {industry} | {code} {name} - 已在第一階段處理，跳過")
+                skipped_count += 1
+                print()
+                continue
+            
+            print(f"📊 [{idx+1}/{len(focus_df)}] {industry} | {code} {name}")
+            
+            # 從資料庫讀取資料
+            stock_df = read_stock_from_db(code)
+            if stock_df is None or len(stock_df) == 0:
+                print(f"    ⚠️ 資料庫中無資料\n")
+                continue
+            
+            # 執行量價分析
+            if len(stock_df) >= 10:
+                analysis = analyze_volume_price_pattern(stock_df)
+                action = analysis['action']
+                risk_level = analysis['risk_level']
+                score = analysis.get('score', 0)
+                
+                print(f"    📊 量價分析: {action} | 風險: {risk_level} | 評分: {score}")
+                print(f"    💡 {analysis['summary']}")
+                
+                # 生成圖表（檔名格式與第一階段一致）
+                type_str = company_info.get(code, {}).get('type', '未知')
+                sector = company_info.get(code, {}).get('sector', '未知')
+                
+                print(f"    🎨 生成圖表...")
+                if generate_stock_chart(code, name, None, output_folder, type_str, sector):
+                    chart_count += 1
+                    
+                    # 收集資料用於保存到資料庫
+                    # 確保數據類型正確
+                    stock_df_copy = stock_df.copy()
+                    for col in ['收盤價', '成交張數']:
+                        if col in stock_df_copy.columns:
+                            stock_df_copy[col] = stock_df_copy[col].astype(str).str.replace(',', '', regex=False)
+                            stock_df_copy[col] = pd.to_numeric(stock_df_copy[col], errors='coerce')
+                    
+                    stock_df_copy['日期'] = pd.to_datetime(stock_df_copy['日期'], errors='coerce')
+                    
+                    latest_close = stock_df_copy['收盤價'].iloc[-1] if '收盤價' in stock_df_copy.columns else 0
+                    last_volume = stock_df_copy['成交張數'].iloc[-1] if '成交張數' in stock_df_copy.columns else 0
+                    latest_date = stock_df_copy['日期'].iloc[-1] if '日期' in stock_df_copy.columns else pd.Timestamp(latest_date_str)
+                    
+                    results_stage2.append({
+                        'code': code,
+                        'latest_date': latest_date.strftime('%Y-%m-%d') if isinstance(latest_date, pd.Timestamp) else latest_date_str,
+                        'latest_close': float(latest_close) if not pd.isna(latest_close) else 0,
+                        'last_volume': int(last_volume) if not pd.isna(last_volume) else 0
+                    })
+            else:
+                print(f"    ⚠️ 資料不足，無法分析")
+            
+            print()
+        
+        # 保存第二階段資料到資料庫（追加模式）
+        if results_stage2:
+            save_to_hot_db(results_stage2, company_info, latest_date_str, is_first_stage=False)
+        
+        print("=" * 70)
+        print(f"✅ 第二階段完成：")
+        print(f"   • 總追蹤股票數: {len(focus_df)}")
+        print(f"   • 跳過重複股票: {skipped_count}")
+        print(f"   • 成功生成圖表: {chart_count}")
+        print(f"   • 輸出資料夾: {output_folder}")
+        
+    except Exception as e:
+        print(f"❌ 讀取追蹤清單失敗: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
+
