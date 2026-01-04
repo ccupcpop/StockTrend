@@ -25,9 +25,7 @@ jobs:
         pip install pandas requests beautifulsoup4 lxml
         
     - name: Run StockTrend2.py
-      run: |
-        cd StockTrend
-        python StockTrend2.py
+      run: python StockTrend/StockTrend2.py
         
     - name: Copy stock_hot.db to StockTracker
       run: |
