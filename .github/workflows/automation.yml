@@ -43,7 +43,7 @@ jobs:
         with:
           repository: ccupcpop/StockTracker
           path: StockTracker
-          token: ${{ secrets.MY_PAT }}
+          token: ${{ secrets.PAT_TOKEN }}
           persist-credentials: true
         
       # 7. 更新檔案並推送到 StockTracker
