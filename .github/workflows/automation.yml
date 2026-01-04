@@ -32,25 +32,40 @@ jobs:
         
     - name: Copy stock_hot.db to StockTracker
       run: |
+        # 複製檔案到臨時位置
+        mkdir -p /tmp/stock_db
+        cp stock_data/stock_hot.db /tmp/stock_db/
+        
+    - name: Checkout StockTracker repository
+      uses: actions/checkout@v4
+      with:
+        repository: ccupcpop/StockTracker
+        path: StockTracker
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Copy and push to StockTracker
+      run: |
         # 確保目標目錄存在
         mkdir -p StockTracker/StockInfo
         
         # 複製資料庫檔案
-        cp stock_data/stock_hot.db StockTracker/StockInfo/
+        cp /tmp/stock_db/stock_hot.db StockTracker/StockInfo/
         
-        echo "Database file copied successfully"
+        # 進入 StockTracker 目錄
+        cd StockTracker
         
-    - name: Commit and push changes
-      run: |
+        # 設定 Git
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "github-actions[bot]"
         
-        git add StockTracker/StockInfo/stock_hot.db
+        # 檢查是否有變更
+        git add StockInfo/stock_hot.db
         
-        # 只有在有變更時才 commit
         if git diff --staged --quiet; then
           echo "No changes to commit"
         else
           git commit -m "Auto update stock_hot.db - $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M:%S')"
           git push
         fi
+        
+        echo "Database file updated successfully"
