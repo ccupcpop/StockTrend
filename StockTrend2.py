@@ -1416,7 +1416,7 @@ def generate_stock_chart(stock_code, stock_name, csv_file, output_folder, stock_
 # 💾 保存到 stock_hot.db
 # ==============================
 def save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True):
-    """將符合條件的股票保存到 stock_hot.db
+    """將符合條件的股票完整交易歷史保存到 stock_hot.db
     
     參數:
         is_first_stage: True=第一階段（會刪除舊資料庫），False=第二階段（追加資料）
@@ -1433,7 +1433,7 @@ def save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True):
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
-        # 創建表格（只在第一階段或表格不存在時創建）
+        # 創建表格 - 包含完整的 OHLCV 資料
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS hot_stocks (
                 股票代碼 TEXT,
@@ -1441,8 +1441,17 @@ def save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True):
                 類型 TEXT,
                 產業分類 TEXT,
                 日期 TEXT,
+                開盤價 REAL,
+                最高價 REAL,
+                最低價 REAL,
                 收盤價 REAL,
                 成交量 INTEGER,
+                成交筆數 TEXT,
+                成交金額 TEXT,
+                本益比 TEXT,
+                外陸資買賣超張數 REAL,
+                投信買賣超張數 REAL,
+                自營商買賣超張數 REAL,
                 操作建議 TEXT,
                 風險等級 TEXT,
                 評分 INTEGER,
@@ -1456,6 +1465,7 @@ def save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True):
         from datetime import datetime
         update_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
+        total_records = 0
         for r in results:
             code = r['code']
             info = company_info.get(code, {})
@@ -1463,34 +1473,81 @@ def save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True):
             type_str = info.get('type', '未知')
             sector = info.get('sector', '未知')
             
-            # 執行量價分析
+            # 讀取該股票的完整歷史資料
             stock_df = read_stock_from_db(code)
-            if stock_df is not None and len(stock_df) >= 10:
+            if stock_df is None or len(stock_df) == 0:
+                continue
+            
+            # 確保數據類型正確
+            stock_df = stock_df.copy()
+            for col in ['開盤價', '最高價', '最低價', '收盤價', '成交張數']:
+                if col in stock_df.columns:
+                    stock_df[col] = stock_df[col].astype(str).str.replace(',', '', regex=False)
+                    stock_df[col] = pd.to_numeric(stock_df[col], errors='coerce')
+            
+            # 只對最近的資料進行量價分析（節省運算時間）
+            analysis = None
+            if len(stock_df) >= 10:
                 analysis = analyze_volume_price_pattern(stock_df)
-                action = analysis['action']
-                risk_level = analysis['risk_level']
-                score = analysis.get('score', 0)
-                summary = analysis.get('summary', '')
-                signals = json.dumps(analysis.get('signals', []), ensure_ascii=False)
+            
+            # 將每一天的資料都寫入資料庫
+            for idx, row in stock_df.iterrows():
+                # 轉換日期格式為統一格式 YYYY.MM.DD
+                try:
+                    date_obj = pd.to_datetime(row['日期'])
+                    date_str = date_obj.strftime('%Y.%m.%d')
+                except:
+                    date_str = str(row['日期'])
+                
+                # 對於最後一天的資料，附加量價分析結果
+                is_latest = (idx == stock_df.index[-1])
+                if is_latest and analysis:
+                    action = analysis['action']
+                    risk_level = analysis['risk_level']
+                    score = analysis.get('score', 0)
+                    summary = analysis.get('summary', '')
+                    signals = json.dumps(analysis.get('signals', []), ensure_ascii=False)
+                else:
+                    # 歷史資料不進行分析，留空
+                    action = ''
+                    risk_level = ''
+                    score = 0
+                    summary = ''
+                    signals = '[]'
                 
                 cursor.execute('''
                     INSERT OR REPLACE INTO hot_stocks 
-                    (股票代碼, 股票名稱, 類型, 產業分類, 日期, 收盤價, 成交量, 操作建議, 風險等級, 評分, 走勢分析, 信號列表, 更新時間)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (股票代碼, 股票名稱, 類型, 產業分類, 日期, 
+                     開盤價, 最高價, 最低價, 收盤價, 成交量,
+                     成交筆數, 成交金額, 本益比,
+                     外陸資買賣超張數, 投信買賣超張數, 自營商買賣超張數,
+                     操作建議, 風險等級, 評分, 走勢分析, 信號列表, 更新時間)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
-                    code, name, type_str, sector, latest_date_str, 
-                    r['latest_close'], r.get('last_volume', 0),
+                    code, name, type_str, sector, date_str,
+                    float(row.get('開盤價', 0)) if not pd.isna(row.get('開盤價')) else 0,
+                    float(row.get('最高價', 0)) if not pd.isna(row.get('最高價')) else 0,
+                    float(row.get('最低價', 0)) if not pd.isna(row.get('最低價')) else 0,
+                    float(row.get('收盤價', 0)) if not pd.isna(row.get('收盤價')) else 0,
+                    int(row.get('成交張數', 0)) if not pd.isna(row.get('成交張數')) else 0,
+                    str(row.get('成交筆數', '')),
+                    str(row.get('成交金額', '')),
+                    str(row.get('本益比', '')),
+                    float(row.get('外陸資買賣超張數', 0)) if not pd.isna(row.get('外陸資買賣超張數')) else 0,
+                    float(row.get('投信買賣超張數', 0)) if not pd.isna(row.get('投信買賣超張數')) else 0,
+                    float(row.get('自營商買賣超張數', 0)) if not pd.isna(row.get('自營商買賣超張數')) else 0,
                     action, risk_level, score, summary, signals, update_time
                 ))
+                total_records += 1
         
         conn.commit()
         conn.close()
         
         if is_first_stage:
-            print(f"\n✅ 第一階段：已保存 {len(results)} 檔股票到 {db_path}")
-            print(f"   資料庫狀態：全新創建，只包含 hot_stocks 表\n")
+            print(f"\n✅ 第一階段：已保存 {len(results)} 檔股票（共 {total_records} 筆交易記錄）到 {db_path}")
+            print(f"   資料庫狀態：全新創建，包含完整交易歷史\n")
         else:
-            print(f"\n✅ 第二階段：已追加 {len(results)} 檔股票到 {db_path}\n")
+            print(f"\n✅ 第二階段：已追加 {len(results)} 檔股票（共 {total_records} 筆交易記錄）到 {db_path}\n")
         
         return True
         
