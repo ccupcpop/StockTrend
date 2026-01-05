@@ -1415,10 +1415,11 @@ def generate_stock_chart(stock_code, stock_name, csv_file, output_folder, stock_
 # ==============================
 # 💾 保存到 stock_hot.db
 # ==============================
-def save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True):
+def save_to_hot_db(results, company_info, latest_date_str, focus_stock_codes=None, is_first_stage=True):
     """將符合條件的股票完整交易歷史保存到 stock_hot.db
     
     參數:
+        focus_stock_codes: focus_stocks.csv 中的股票代碼集合
         is_first_stage: True=第一階段（會刪除舊資料庫），False=第二階段（追加資料）
     """
     try:
@@ -1458,6 +1459,7 @@ def save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True):
                 走勢分析 TEXT,
                 信號列表 TEXT,
                 更新時間 TEXT,
+                IS_FOCUS INTEGER,
                 PRIMARY KEY (股票代碼, 日期)
             )
         ''')
@@ -1515,14 +1517,17 @@ def save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True):
                     summary = ''
                     signals = '[]'
                 
+                # 判斷是否為 focus 股票
+                is_focus = 1 if (focus_stock_codes and code in focus_stock_codes) else 0
+                
                 cursor.execute('''
                     INSERT OR REPLACE INTO hot_stocks 
                     (股票代碼, 股票名稱, 類型, 產業分類, 日期, 
                      開盤價, 最高價, 最低價, 收盤價, 成交量,
                      成交筆數, 成交金額, 本益比,
                      外陸資買賣超張數, 投信買賣超張數, 自營商買賣超張數,
-                     操作建議, 風險等級, 評分, 走勢分析, 信號列表, 更新時間)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     操作建議, 風險等級, 評分, 走勢分析, 信號列表, 更新時間, IS_FOCUS)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     code, name, type_str, sector, date_str,
                     float(row.get('開盤價', 0)) if not pd.isna(row.get('開盤價')) else 0,
@@ -1536,7 +1541,7 @@ def save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True):
                     float(row.get('外陸資買賣超張數', 0)) if not pd.isna(row.get('外陸資買賣超張數')) else 0,
                     float(row.get('投信買賣超張數', 0)) if not pd.isna(row.get('投信買賣超張數')) else 0,
                     float(row.get('自營商買賣超張數', 0)) if not pd.isna(row.get('自營商買賣超張數')) else 0,
-                    action, risk_level, score, summary, signals, update_time
+                    action, risk_level, score, summary, signals, update_time, is_focus
                 ))
                 total_records += 1
         
@@ -1599,6 +1604,18 @@ def main():
     # 建立以日期命名的子資料夾
     output_folder = base_output_folder / latest_date_str
     output_folder.mkdir(exist_ok=True)
+    
+    # 讀取 focus_stocks.csv 取得追蹤股票代碼
+    focus_stock_codes = set()
+    focus_csv_path = Path(FOCUS_STOCKS_CSV)
+    if focus_csv_path.exists():
+        try:
+            focus_df = pd.read_csv(focus_csv_path, encoding='utf-8')
+            focus_df = focus_df.drop_duplicates(subset=['股票代碼'], keep='first')
+            focus_stock_codes = set(focus_df['股票代碼'].astype(str).values)
+            print(f"📋 已讀取 {len(focus_stock_codes)} 檔追蹤股票")
+        except Exception as e:
+            print(f"⚠️ 讀取追蹤清單失敗: {e}")
     
     # ==========================================
     # 第一階段：一般模式（掃描所有股票）
@@ -1681,7 +1698,7 @@ def main():
             print()
         
         # 保存到資料庫（第一階段，創建全新資料庫）
-        save_to_hot_db(results, company_info, latest_date_str, is_first_stage=True)
+        save_to_hot_db(results, company_info, latest_date_str, focus_stock_codes, is_first_stage=True)
         
         print("=" * 70)
         print(f"✅ 第一階段完成：成功生成 {chart_count} 個「上車」建議的圖表")
@@ -1786,7 +1803,7 @@ def main():
         
         # 保存第二階段資料到資料庫（追加模式）
         if results_stage2:
-            save_to_hot_db(results_stage2, company_info, latest_date_str, is_first_stage=False)
+            save_to_hot_db(results_stage2, company_info, latest_date_str, focus_stock_codes, is_first_stage=False)
         
         print("=" * 70)
         print(f"✅ 第二階段完成：")
